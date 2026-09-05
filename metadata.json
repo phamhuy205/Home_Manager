@@ -1,0 +1,6 @@
+{
+  "name": "Hệ Thống Quản Lý Nhà Trọ",
+  "description": "Phần mềm quản lý nhà trọ chuyên nghiệp với phân quyền chủ trọ và người thuê, tính tiền điện 4k/số, thông báo nhắc đóng tiền tự động, báo cáo doanh thu và lịch sử thanh toán chi tiết.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
