@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Building2,
   Users,
@@ -20,22 +20,45 @@ import {
   AlertCircle,
   Home,
   Check,
+  FileSignature,
+  ShieldAlert,
 } from 'lucide-react';
 import { useApp, AssignTenantData } from '../../context/AppContext';
 import { Room } from '../../types';
+import { buildDefaultContractTerms } from '../../constants';
 import { formatCurrency, formatDate } from '../../utils/formatters';
 
 interface RoomManagementProps {
   onRecordElectricity: (roomId: string) => void;
+  initialLeaveRequest?: { roomId: string; reason: string } | null;
+  onLeaveRequestConsumed?: () => void;
+  onViewWarnings?: (roomId: string) => void;
 }
 
-export const RoomManagement: React.FC<RoomManagementProps> = ({ onRecordElectricity }) => {
+const addMonths = (dateStr: string, months: number) => {
+  const d = new Date(dateStr);
+  d.setMonth(d.getMonth() + months);
+  return d.toISOString().split('T')[0];
+};
+
+export const RoomManagement: React.FC<RoomManagementProps> = ({
+  onRecordElectricity,
+  initialLeaveRequest,
+  onLeaveRequestConsumed,
+  onViewWarnings,
+}) => {
   const {
     rooms,
     assignTenantToRoom,
     removeTenantFromRoom,
     updateTenant,
     updateRoom,
+    contracts,
+    createContract,
+    warningCountForRoom,
+    warningLimit,
+    propertyName,
+    ownerName,
   } = useApp();
 
   const [filterType, setFilterType] = useState<'ALL' | 'VIP' | 'STANDARD' | 'OCCUPIED' | 'VACANT'>('ALL');
@@ -56,6 +79,7 @@ export const RoomManagement: React.FC<RoomManagementProps> = ({ onRecordElectric
     deposit: 1000000,
     occupants: 1,
     startElectricityIndex: 0,
+    createContract: true,
   });
 
   // Form states for Leaving Room (Khách không thuê nữa)
@@ -111,6 +135,7 @@ export const RoomManagement: React.FC<RoomManagementProps> = ({ onRecordElectric
       deposit: room.type === 'VIP' ? 2000000 : 1000000,
       occupants: 1,
       startElectricityIndex: room.lastElectricityIndex,
+      createContract: true,
     });
   };
 
@@ -129,10 +154,55 @@ export const RoomManagement: React.FC<RoomManagementProps> = ({ onRecordElectric
 
     const success = assignTenantToRoom(assigningRoom.id, assignForm);
     if (success) {
-      showToast(`Đã cho thuê thành công ${assigningRoom.roomNumber} cho khách ${assignForm.name}!`);
+      let message = `Đã cho thuê thành công ${assigningRoom.roomNumber} cho khách ${assignForm.name}!`;
+
+      // Tự tạo hợp đồng điện tử khi chủ trọ chọn (mặc định bật)
+      if (assignForm.createContract) {
+        const startDate = assignForm.startDate || new Date().toISOString().split('T')[0];
+        const endDate = addMonths(startDate, 12);
+        const contractResult = createContract({
+          roomId: assigningRoom.id,
+          tenantName: assignForm.name.trim(),
+          tenantPhone: assignForm.phone.trim(),
+          tenantIdCard: assignForm.idCard.trim(),
+          startDate,
+          endDate,
+          monthlyRent: assigningRoom.basePrice,
+          deposit: assignForm.deposit,
+          terms: buildDefaultContractTerms({
+            propertyName,
+            ownerName,
+            roomNumber: assigningRoom.roomNumber,
+            tenantName: assignForm.name.trim(),
+            tenantIdCard: assignForm.idCard.trim(),
+            startDate,
+            endDate,
+            monthlyRent: assigningRoom.basePrice,
+            deposit: assignForm.deposit,
+          }),
+        });
+        message += contractResult.success
+          ? ` Đã tạo hợp đồng ${contractResult.contract?.contractCode} (12 tháng).`
+          : ` (Hợp đồng: ${contractResult.message})`;
+      }
+
+      showToast(message);
       setAssigningRoom(null);
     }
   };
+
+  // Mở sẵn modal trả phòng khi tab Cảnh cáo chuyển sang đây (yêu cầu rời trọ do vi phạm)
+  useEffect(() => {
+    if (!initialLeaveRequest) return;
+    const room = rooms.find((r) => r.id === initialLeaveRequest.roomId);
+    if (room && room.isOccupied) {
+      setLeavingRoom(room);
+      setLeaveReason(initialLeaveRequest.reason);
+      setFinalElecIndex(room.lastElectricityIndex);
+      setRefundDeposit(true);
+    }
+    onLeaveRequestConsumed?.();
+  }, [initialLeaveRequest]);
 
   // Open Leaving Modal (Không thuê nữa)
   const handleOpenLeave = (room: Room) => {
@@ -227,6 +297,7 @@ export const RoomManagement: React.FC<RoomManagementProps> = ({ onRecordElectric
 
         {/* Quick summary pill counters */}
         <div className="flex flex-wrap items-center gap-2">
+
           <div className="px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 text-xs flex items-center space-x-1.5">
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 inline-block animate-pulse"></span>
             <span className="text-slate-300 font-bold">Đang thuê:</span>
@@ -314,6 +385,17 @@ export const RoomManagement: React.FC<RoomManagementProps> = ({ onRecordElectric
         {filteredRooms.map((room) => {
           const isVIP = room.type === 'VIP';
           const isOccupied = room.isOccupied;
+          const warningCount = warningCountForRoom(room.id);
+          const activeContract = contracts.find((c) => c.roomId === room.id && c.status === 'ACTIVE');
+          const contractDaysLeft = activeContract
+            ? Math.ceil((new Date(activeContract.endDate).getTime() - Date.now()) / 86_400_000)
+            : null;
+          const warningChipClass =
+            warningCount >= warningLimit
+              ? 'bg-rose-600 text-white border-rose-500'
+              : warningCount >= 3
+              ? 'bg-orange-500/20 text-orange-300 border-orange-500/40'
+              : 'bg-amber-500/20 text-amber-300 border-amber-500/40';
 
           return (
             <div
@@ -349,6 +431,18 @@ export const RoomManagement: React.FC<RoomManagementProps> = ({ onRecordElectric
                   </div>
 
                   <div className="flex items-center space-x-1.5">
+                    {isOccupied && warningCount > 0 && (
+                      <button
+                        onClick={() => onViewWarnings?.(room.id)}
+                        title={`Đã bị cảnh cáo ${warningCount}/${warningLimit} lần — bấm để xem chi tiết`}
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold flex items-center space-x-1 border ${warningChipClass} transition hover:brightness-110`}
+                      >
+                        <ShieldAlert className="w-3 h-3" />
+                        <span>
+                          {warningCount}/{warningLimit}
+                        </span>
+                      </button>
+                    )}
                     <span
                       className={`px-2.5 py-0.5 rounded-full text-[10px] font-extrabold flex items-center space-x-1 ${
                         isOccupied
@@ -391,6 +485,28 @@ export const RoomManagement: React.FC<RoomManagementProps> = ({ onRecordElectric
                         <span className="text-slate-200 font-bold">
                           {formatCurrency(room.tenant.deposit)}
                         </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-400 text-[11px] flex items-center space-x-1">
+                          <FileSignature className="w-3 h-3" />
+                          <span>Hợp đồng điện tử:</span>
+                        </span>
+                        {activeContract ? (
+                          <span
+                            className={`font-bold text-[11px] ${
+                              contractDaysLeft !== null && contractDaysLeft <= 30
+                                ? 'text-amber-400'
+                                : 'text-emerald-400'
+                            }`}
+                          >
+                            Đến {formatDate(activeContract.endDate)}
+                            {contractDaysLeft !== null && contractDaysLeft <= 30
+                              ? ` (còn ${contractDaysLeft} ngày)`
+                              : ''}
+                          </span>
+                        ) : (
+                          <span className="text-slate-500 italic text-[11px]">Chưa tạo</span>
+                        )}
                       </div>
                     </>
                   ) : (
@@ -620,6 +736,26 @@ export const RoomManagement: React.FC<RoomManagementProps> = ({ onRecordElectric
                   Số điện này sẽ được dùng làm mốc cũ để tính hóa đơn tiền điện tháng tiếp theo.
                 </p>
               </div>
+
+              <label className="flex items-start space-x-3 p-3.5 bg-indigo-500/10 border border-indigo-500/30 rounded-2xl cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={assignForm.createContract || false}
+                  onChange={(e) => setAssignForm({ ...assignForm, createContract: e.target.checked })}
+                  className="mt-0.5 w-4 h-4 accent-indigo-500"
+                />
+                <span className="text-xs">
+                  <span className="font-black text-indigo-300 flex items-center space-x-1.5">
+                    <FileSignature className="w-3.5 h-3.5" />
+                    <span>Tạo hợp đồng thuê nhà điện tử (12 tháng)</span>
+                  </span>
+                  <span className="text-slate-400 block mt-0.5 leading-relaxed">
+                    Hệ thống tự lập HĐ từ {assignForm.startDate ? formatDate(assignForm.startDate) : 'ngày vào ở'} với giá{' '}
+                    {formatCurrency(assigningRoom.basePrice)}/tháng, gồm điều khoản & nội quy 6 hành vi. In PDF từ tab
+                    Hợp đồng hoặc lưu bản scan giấy bất cứ lúc nào.
+                  </span>
+                </span>
+              </label>
 
               <div className="pt-3 border-t border-slate-700 flex items-center justify-end space-x-3">
                 <button

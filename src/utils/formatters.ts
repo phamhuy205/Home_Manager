@@ -35,9 +35,9 @@ export const formatDateTime = (dateStr?: string): string => {
 };
 
 export const getVietQRUrl = ({
-  bank = 'MB',
-  accountNo = '0909999888',
-  accountName = 'NGUYEN VAN QUAN',
+  bank = 'ICB',
+  accountNo = '103874953538',
+  accountName = 'PHẠM XUÂN HUY',
   amount,
   description,
 }: {

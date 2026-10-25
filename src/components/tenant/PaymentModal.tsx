@@ -26,7 +26,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   onClose,
   invoice,
 }) => {
-  const { submitPayment } = useApp();
+  const { submitPayment, currentUser } = useApp();
   const [method, setMethod] = useState<PaymentMethod>('BANK_TRANSFER');
   const [transactionRef, setTransactionRef] = useState('');
   const [note, setNote] = useState('');
@@ -36,16 +36,24 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
   if (!isOpen) return null;
 
-  const bankAccount = '0909999888';
-  const bankName = 'MB Bank (Ngân hàng Quân Đội)';
-  const accountHolder = 'NGUYEN VAN QUAN (CHỦ TRỌ)';
+  const bankAccount = '103874953538';
+  const bankName = 'VietinBank (Ngân hàng TMCP Công Thương)';
+  const accountHolder = 'PHẠM XUÂN HUY';
   const transferMemo = `${invoice.roomNumber.replace(/\s+/g, '')} T${invoice.month} ${invoice.year}`;
 
+  const mySplitIndex = (() => {
+    const username = currentUser?.username || '';
+    const match = username.match(/-(\d+)$/);
+    return match ? parseInt(match[1], 10) - 1 : 0;
+  })();
+  const mySplit = invoice.splits && invoice.splits.length > 0 ? invoice.splits[mySplitIndex] || null : null;
+  const payAmount = mySplit ? Math.max(0, mySplit.amount - mySplit.paidAmount) : invoice.totalAmount;
+
   const qrUrl = getVietQRUrl({
-    bank: 'MB',
+    bank: 'ICB',
     accountNo: bankAccount,
     accountName: accountHolder,
-    amount: invoice.totalAmount,
+    amount: payAmount,
     description: transferMemo,
   });
 
@@ -64,7 +72,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     e.preventDefault();
     const ok = submitPayment({
       invoiceId: invoice.id,
-      amount: invoice.totalAmount,
+      amount: payAmount,
       method,
       transactionRef: transactionRef.trim() || undefined,
       note: note.trim() || `Thanh toán tiền phòng ${invoice.roomNumber} T${invoice.month}`,
@@ -124,8 +132,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 <div>
                   <span className="text-xs text-slate-400 font-medium">Số tiền cần thanh toán</span>
                   <div className="text-2xl font-black text-amber-400 mt-0.5">
-                    {formatCurrency(invoice.totalAmount)}
+                    {formatCurrency(payAmount)}
                   </div>
+                  {mySplit && (
+                    <div className="text-[10px] text-slate-500 mt-0.5">
+                      Phần của bạn ({mySplit.label}) trong tổng {formatCurrency(invoice.totalAmount)}
+                    </div>
+                  )}
                 </div>
                 <span className="text-xs font-bold text-slate-300 bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-700">
                   {invoice.roomType === 'VIP' ? 'Phòng VIP (2tr)' : 'Phòng Thường (1tr)'}
@@ -271,7 +284,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                       <span>Thanh toán tiền mặt trực tiếp:</span>
                     </div>
                     <p>
-                      Vui lòng gặp chủ trọ Nguyễn Văn Quản tại văn phòng tầng trệt để nộp <strong className="text-amber-400">{formatCurrency(invoice.totalAmount)}</strong> và nhận phiếu thu.
+                      Vui lòng gặp chủ trọ Nguyễn Văn Quản tại văn phòng tầng trệt để nộp <strong className="text-amber-400">{formatCurrency(payAmount)}</strong> và nhận phiếu thu.
                     </p>
                   </div>
 

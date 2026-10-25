@@ -4,9 +4,6 @@ import {
   Bell,
   LogOut,
   UserCheck,
-  CheckCircle2,
-  Clock,
-  Sparkles,
   RefreshCw,
   SlidersHorizontal,
 } from 'lucide-react';
@@ -21,18 +18,17 @@ interface NavbarProps {
 export const Navbar: React.FC<NavbarProps> = ({ onOpenNotifications, onOpenQuickLogin }) => {
   const {
     currentUser,
-    users,
-    switchUser,
     logout,
     unreadNotificationCount,
-    rooms,
     resetData,
+    propertyName,
+    ownerName,
+    updatePropertySettings,
   } = useApp();
 
-  const [showSwitchMenu, setShowSwitchMenu] = useState(false);
-
-  const vipRooms = rooms.filter((r) => r.type === 'VIP');
-  const stdRooms = rooms.filter((r) => r.type === 'STANDARD');
+  const [showSettings, setShowSettings] = useState(false);
+  const [draftPropertyName, setDraftPropertyName] = useState(propertyName);
+  const [draftOwnerName, setDraftOwnerName] = useState(ownerName);
 
   return (
     <header className="sticky top-0 z-30 bg-[#1E293B] border-b border-slate-700/80 shadow-md">
@@ -46,7 +42,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenNotifications, onOpenQuick
             <div>
               <div className="flex items-center space-x-2">
                 <span className="font-extrabold text-lg text-slate-100 tracking-tight">
-                  Nhà Trọ An Cư
+                  {propertyName}
                 </span>
                 <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
                   16 Phòng
@@ -60,114 +56,61 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenNotifications, onOpenQuick
                 <span className="text-blue-400 font-semibold">Điện 4k/số</span>
               </div>
             </div>
+
+            {currentUser?.role === 'ADMIN' && (
+              <div className="relative">
+                <button
+                  onClick={() => {
+                    setDraftPropertyName(propertyName);
+                    setDraftOwnerName(ownerName);
+                    setShowSettings(!showSettings);
+                  }}
+                  className="p-2 rounded-xl text-slate-400 hover:text-indigo-400 hover:bg-slate-800 transition border border-slate-700/60"
+                  title="Cài đặt nhà trọ"
+                >
+                  <SlidersHorizontal className="w-4 h-4" />
+                </button>
+                {showSettings && (
+                  <form
+                    className="absolute right-0 mt-2 w-72 bg-[#1E293B] rounded-2xl shadow-2xl border border-slate-700 p-4 z-50 space-y-3"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      updatePropertySettings(draftPropertyName, draftOwnerName);
+                      setShowSettings(false);
+                    }}
+                  >
+                    <div className="text-xs font-bold text-slate-200">Cài đặt nhà trọ</div>
+                    <input
+                      value={draftPropertyName}
+                      onChange={(event) => setDraftPropertyName(event.target.value)}
+                      placeholder="Tên nhà trọ"
+                      className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100"
+                      required
+                    />
+                    <input
+                      value={draftOwnerName}
+                      onChange={(event) => setDraftOwnerName(event.target.value)}
+                      placeholder="Tên chủ trọ"
+                      className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100"
+                      required
+                    />
+                    <button type="submit" className="w-full py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-white">
+                      Lưu cài đặt
+                    </button>
+                  </form>
+                )}
+              </div>
+            )}
           </div>
 
           {/* User Controls */}
           <div className="flex items-center space-x-2 sm:space-x-3">
-            {/* Fast Role Switcher Dropdown */}
-            <div className="relative">
-              <button
-                onClick={() => setShowSwitchMenu(!showSwitchMenu)}
-                className="flex items-center space-x-2 px-3 py-1.5 rounded-xl border border-slate-700 hover:border-slate-600 bg-slate-800/80 text-xs font-semibold text-slate-200 transition"
-                title="Đổi vai trò xem để kiểm tra chức năng"
-              >
-                <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-400" />
-                <span className="hidden sm:inline text-slate-400 font-normal">Vai trò:</span>
-                <span className="font-bold text-white truncate max-w-[120px]">
-                  {currentUser?.role === 'ADMIN' ? 'Chủ trọ (Admin)' : currentUser?.fullName.split(' ').slice(-1)[0]}
-                </span>
-              </button>
-
-              {showSwitchMenu && (
-                <div
-                  className="absolute right-0 mt-2 w-72 bg-[#1E293B] rounded-2xl shadow-2xl border border-slate-700 py-2 z-50 animate-in fade-in slide-in-from-top-2 duration-150 text-slate-200"
-                  onMouseLeave={() => setShowSwitchMenu(false)}
-                >
-                  <div className="px-3.5 py-1.5 border-b border-slate-700/80 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                    Chọn tài khoản trải nghiệm
-                  </div>
-                  {/* Admin option */}
-                  <button
-                    onClick={() => {
-                      switchUser('admin-1');
-                      setShowSwitchMenu(false);
-                    }}
-                    className={`w-full text-left px-3.5 py-2.5 text-xs flex items-center justify-between hover:bg-slate-800 transition ${
-                      currentUser?.role === 'ADMIN' ? 'bg-indigo-600/20 font-bold text-indigo-300 border-l-2 border-indigo-500' : 'text-slate-300'
-                    }`}
-                  >
-                    <div className="flex items-center space-x-2.5">
-                      <div className="w-7 h-7 rounded-lg bg-indigo-600 text-white flex items-center justify-center text-[10px] font-bold">
-                        QT
-                      </div>
-                      <div>
-                        <div className="font-bold text-slate-100">Chủ Trọ (Admin)</div>
-                        <div className="text-[10px] text-slate-400">Toàn quyền quản lý 16 phòng</div>
-                      </div>
-                    </div>
-                    {currentUser?.role === 'ADMIN' && <CheckCircle2 className="w-4 h-4 text-indigo-400" />}
-                  </button>
-
-                  <div className="px-3.5 py-1.5 mt-1 border-t border-b border-slate-700/80 text-[10px] font-bold text-amber-400 bg-amber-500/10 uppercase tracking-wider">
-                    Phòng VIP (5 phòng - 2.000.000 đ)
-                  </div>
-                  <div className="max-h-36 overflow-y-auto">
-                    {vipRooms.map((r) => {
-                      const user = users.find((u) => u.roomId === r.id);
-                      if (!user) return null;
-                      const isCurrent = currentUser?.id === user.id;
-                      return (
-                        <button
-                          key={r.id}
-                          onClick={() => {
-                            switchUser(user.id);
-                            setShowSwitchMenu(false);
-                          }}
-                          className={`w-full text-left px-3.5 py-1.5 text-xs flex items-center justify-between hover:bg-slate-800 transition ${
-                            isCurrent ? 'bg-amber-500/20 font-bold text-amber-300 border-l-2 border-amber-500' : 'text-slate-300'
-                          }`}
-                        >
-                          <div className="flex items-center space-x-2">
-                            <span className="font-bold text-amber-400">{r.roomNumber}:</span>
-                            <span className="truncate max-w-[130px]">{user.fullName}</span>
-                          </div>
-                          {isCurrent && <CheckCircle2 className="w-3.5 h-3.5 text-amber-400" />}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  <div className="px-3.5 py-1.5 border-t border-b border-slate-700/80 text-[10px] font-bold text-emerald-400 bg-emerald-500/10 uppercase tracking-wider">
-                    Phòng Thường (11 phòng - 1.000.000 đ)
-                  </div>
-                  <div className="max-h-40 overflow-y-auto">
-                    {stdRooms.slice(0, 8).map((r) => {
-                      const user = users.find((u) => u.roomId === r.id);
-                      if (!user) return null;
-                      const isCurrent = currentUser?.id === user.id;
-                      return (
-                        <button
-                          key={r.id}
-                          onClick={() => {
-                            switchUser(user.id);
-                            setShowSwitchMenu(false);
-                          }}
-                          className={`w-full text-left px-3.5 py-1.5 text-xs flex items-center justify-between hover:bg-slate-800 transition ${
-                            isCurrent ? 'bg-emerald-500/20 font-bold text-emerald-300 border-l-2 border-emerald-500' : 'text-slate-300'
-                          }`}
-                        >
-                          <div className="flex items-center space-x-2">
-                            <span className="font-bold text-emerald-400">{r.roomNumber}:</span>
-                            <span className="truncate max-w-[130px]">{user.fullName}</span>
-                          </div>
-                          {isCurrent && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
+            {/* Role label badge */}
+            {currentUser && (
+              <span className="hidden sm:inline-flex items-center px-2.5 py-1.5 rounded-xl border border-slate-700 bg-slate-800/80 text-xs font-semibold text-slate-300">
+                {currentUser.role === 'ADMIN' ? 'Chủ trọ (Admin)' : 'Khách thuê'}
+              </span>
+            )}
 
             {/* Notification Bell */}
             <button

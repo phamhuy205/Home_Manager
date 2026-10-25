@@ -10,13 +10,16 @@ import {
   ArrowRight,
   BellRing,
   Sparkles,
+  ShieldAlert,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { Room } from '../../types';
 import { formatCurrency } from '../../utils/formatters';
 
 interface DashboardOverviewProps {
-  onNavigateTab: (tab: 'rooms' | 'electricity' | 'invoices' | 'revenue' | 'payments') => void;
+  onNavigateTab: (
+    tab: 'rooms' | 'electricity' | 'invoices' | 'revenue' | 'payments' | 'debt' | 'contracts' | 'warnings'
+  ) => void;
   onSelectRoomForElectricity: (roomId: string) => void;
 }
 
@@ -24,7 +27,19 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   onNavigateTab,
   onSelectRoomForElectricity,
 }) => {
-  const { rooms, invoices, payments, approvePayment, sendPaymentReminder, currentMonth, currentYear } = useApp();
+  const {
+    rooms,
+    invoices,
+    payments,
+    warnings,
+    warningLimit,
+    warningCountForRoom,
+    approvePayment,
+    sendPaymentReminder,
+    currentMonth,
+    currentYear,
+    propertyName,
+  } = useApp();
 
   const vipRooms = rooms.filter((r) => r.type === 'VIP');
   const stdRooms = rooms.filter((r) => r.type === 'STANDARD');
@@ -43,6 +58,9 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 
   const pendingApprovals = payments.filter((p) => !p.approvedByAdmin);
 
+  const warnedRooms = rooms.filter((r) => warningCountForRoom(r.id) > 0);
+  const overLimitRooms = rooms.filter((r) => warningCountForRoom(r.id) >= warningLimit);
+
   return (
     <div className="space-y-6">
       {/* Top Bento Row: Welcome & Highlight Action Cards */}
@@ -55,7 +73,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
               <span>Bảng Điều Khiển Bento • Chủ Trọ</span>
             </div>
             <h1 className="text-2xl font-extrabold text-slate-100 tracking-tight">
-              Nhà Trọ An Cư • Tháng {currentMonth}/{currentYear}
+              {propertyName} • Tháng {currentMonth}/{currentYear}
             </h1>
             <p className="text-xs text-slate-400 mt-2 leading-relaxed max-w-lg">
               Hệ thống quản lý 16 phòng trọ (5 phòng VIP giá 2.000.000 đ/tháng, 11 phòng thường giá 1.000.000 đ/tháng). Giá điện chốt chính xác 4.000 đ/số.
@@ -187,6 +205,57 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Banner phòng vi phạm nội quy (nếu có) */}
+      {warnedRooms.length > 0 && (
+        <div className="bg-rose-500/10 border border-rose-500/40 rounded-3xl p-5 sm:p-6 shadow-sm space-y-4 animate-in fade-in">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 rounded-2xl bg-rose-500/20 text-rose-300 border border-rose-500/40 flex items-center justify-center shrink-0 shadow-sm">
+                <ShieldAlert className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-rose-300">
+                  {warnedRooms.length} phòng đã bị lập biên bản cảnh cáo nội quy
+                </h3>
+                <p className="text-xs text-slate-300 mt-0.5">
+                  {overLimitRooms.length > 0 ? (
+                    <>
+                      <strong className="text-rose-400">{overLimitRooms.length} phòng</strong> đã đạt giới hạn{' '}
+                      {warningLimit}/{warningLimit} lần và bắt buộc phải rời đi:{' '}
+                      <strong className="text-rose-300">{overLimitRooms.map((r) => r.roomNumber).join(', ')}</strong>
+                    </>
+                  ) : (
+                    <>Giới hạn {warningLimit} lần cảnh cáo; đạt ngưỡng thì phòng phải rời khỏi trọ.</>
+                  )}
+                </p>
+              </div>
+            </div>
+
+            <button
+              onClick={() => onNavigateTab('warnings')}
+              className="text-xs font-bold text-rose-400 hover:text-rose-300 flex items-center space-x-1 shrink-0"
+            >
+              <span>Quản lý cảnh cáo</span>
+              <ArrowRight className="w-3.5 h-3.5 ml-1" />
+            </button>
+          </div>
+
+          {overLimitRooms.length > 0 && (
+            <div className="flex flex-wrap gap-2 pt-1">
+              {overLimitRooms.map((r) => (
+                <button
+                  key={r.id}
+                  onClick={() => onNavigateTab('warnings')}
+                  className="px-3 py-1.5 bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/40 rounded-xl text-[11px] font-black text-rose-200 transition"
+                >
+                  {r.roomNumber}: {warningCountForRoom(r.id)}/{warningLimit} lần → rời trọ
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

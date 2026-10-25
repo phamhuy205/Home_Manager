@@ -1,7 +1,9 @@
 import React from 'react';
-import { X, Printer, CheckCircle, Zap, Droplets, Building2 } from 'lucide-react';
+import { X, Printer, CheckCircle, Zap, Droplets, Building2, FileDown } from 'lucide-react';
 import { Invoice } from '../types';
 import { formatCurrency, formatDate } from '../utils/formatters';
+import { useApp } from '../context/AppContext';
+import { exportInvoicePdf } from '../utils/pdf';
 
 interface InvoiceDetailModalProps {
   invoice: Invoice | null;
@@ -9,10 +11,15 @@ interface InvoiceDetailModalProps {
 }
 
 export const InvoiceDetailModal: React.FC<InvoiceDetailModalProps> = ({ invoice, onClose }) => {
+  const { propertyName, ownerName } = useApp();
   if (!invoice) return null;
 
   const handlePrint = () => {
     window.print();
+  };
+
+  const handleExportPdf = () => {
+    exportInvoicePdf(invoice, propertyName, ownerName);
   };
 
   const isVIP = invoice.roomType === 'VIP';
@@ -25,6 +32,14 @@ export const InvoiceDetailModal: React.FC<InvoiceDetailModalProps> = ({ invoice,
         <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50">
           <span className="text-xs font-bold text-slate-700">Chi Tiết Hóa Đơn & Phiếu Thu</span>
           <div className="flex items-center space-x-2">
+            <button
+              onClick={handleExportPdf}
+              className="p-1.5 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-200 text-xs flex items-center space-x-1"
+              title="Xuất hóa đơn PDF"
+            >
+              <FileDown className="w-4 h-4" />
+              <span className="hidden sm:inline">Xuất PDF</span>
+            </button>
             <button
               onClick={handlePrint}
               className="p-1.5 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-200 text-xs flex items-center space-x-1"
@@ -50,7 +65,7 @@ export const InvoiceDetailModal: React.FC<InvoiceDetailModalProps> = ({ invoice,
               PHIẾU THU TIỀN PHÒNG & ĐIỆN NƯỚC
             </h2>
             <p className="text-xs text-slate-500 font-semibold mt-0.5">
-              HỆ THỐNG NHÀ TRỌ AN CƯ
+              {propertyName.toUpperCase()}
             </p>
             <div className="mt-2 inline-block font-mono text-[11px] bg-slate-100 px-3 py-1 rounded-full text-slate-700 font-bold">
               Mã số: {invoice.invoiceCode} • Kỳ: Tháng {invoice.month}/{invoice.year}
@@ -179,6 +194,34 @@ export const InvoiceDetailModal: React.FC<InvoiceDetailModalProps> = ({ invoice,
             </span>
           </div>
 
+          {/* Equal split among occupants */}
+          {invoice.splits && invoice.splits.length > 0 && (
+            <div className="border border-slate-200 rounded-xl p-3.5 bg-slate-50">
+              <div className="text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-2">
+                Chia đều cho {invoice.splits.length} người ở
+              </div>
+              <div className="space-y-1.5">
+                {invoice.splits.map((split) => (
+                  <div key={split.id} className="flex items-center justify-between text-xs">
+                    <span className="text-slate-600">{split.label}</span>
+                    <span className="font-bold text-slate-900">{formatCurrency(split.amount)}</span>
+                    <span
+                      className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
+                        split.status === 'PAID'
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : split.status === 'PENDING_APPROVAL'
+                            ? 'bg-amber-100 text-amber-700'
+                            : 'bg-slate-200 text-slate-600'
+                      }`}
+                    >
+                      {split.status === 'PAID' ? 'Đã trả' : split.status === 'PENDING_APPROVAL' ? 'Chờ duyệt' : 'Chưa trả'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Signatures */}
           <div className="grid grid-cols-2 text-center pt-4 text-xs">
             <div>
@@ -188,7 +231,7 @@ export const InvoiceDetailModal: React.FC<InvoiceDetailModalProps> = ({ invoice,
               <span className="font-medium text-slate-600">{invoice.tenantName}</span>
             </div>
             <div>
-              <span className="font-bold text-slate-700 block">Chủ nhà trọ</span>
+              <span className="font-bold text-slate-700 block">{ownerName}</span>
               <span className="text-[10px] text-slate-400 italic">(Xác nhận đã nhận tiền)</span>
               <div className="h-12"></div>
               <span className="font-medium text-slate-600">Nguyễn Văn Quản</span>

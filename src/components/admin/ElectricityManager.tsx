@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Zap,
   Droplets,
@@ -27,6 +27,7 @@ export const ElectricityManager: React.FC = () => {
   const existingInvoice = invoices.find(
     (inv) => inv.roomId === selectedRoomId && inv.month === targetMonth && inv.year === targetYear
   );
+  const isPeriodClosed = Boolean(existingInvoice);
 
   // Input states
   const [oldIndex, setOldIndex] = useState<number>(() => {
@@ -43,28 +44,40 @@ export const ElectricityManager: React.FC = () => {
 
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
+  const loadPeriodData = (roomId: string, month: number, year: number) => {
+    const room = rooms.find((item) => item.id === roomId);
+    if (!room) return;
+
+    const periodInvoice = invoices.find(
+      (item) => item.roomId === roomId && item.month === month && item.year === year
+    );
+    const previousInvoice = invoices
+      .filter(
+        (item) =>
+          item.roomId === roomId &&
+          (item.year < year || (item.year === year && item.month < month))
+      )
+      .sort((a, b) => b.year - a.year || b.month - a.month)[0];
+    const previousIndex = month === 1
+      ? 0
+      : previousInvoice?.newElectricityIndex ?? room.lastElectricityIndex;
+
+    setOldIndex(periodInvoice?.oldElectricityIndex ?? previousIndex);
+    setNewIndex(periodInvoice?.newElectricityIndex ?? (month === 1 ? 0 : previousIndex + 45));
+    setWaterCount(periodInvoice?.waterUsage ?? (room.currentOccupants || 1));
+    setOtherFee(periodInvoice?.otherFee || 0);
+    setOtherFeeNote(periodInvoice?.otherFeeNote || '');
+  };
+
+  useEffect(() => {
+    loadPeriodData(selectedRoomId, targetMonth, targetYear);
+    setFeedback(null);
+  }, [selectedRoomId, targetMonth, targetYear]);
+
   // Update inputs whenever selected room changes
   const handleSelectRoom = (roomId: string) => {
     setSelectedRoomId(roomId);
     setFeedback(null);
-    const r = rooms.find((item) => item.id === roomId);
-    const inv = invoices.find(
-      (item) => item.roomId === roomId && item.month === targetMonth && item.year === targetYear
-    );
-
-    if (inv) {
-      setOldIndex(inv.oldElectricityIndex);
-      setNewIndex(inv.newElectricityIndex);
-      setWaterCount(inv.waterUsage);
-      setOtherFee(inv.otherFee || 0);
-      setOtherFeeNote(inv.otherFeeNote || '');
-    } else if (r) {
-      setOldIndex(r.lastElectricityIndex);
-      setNewIndex(r.lastElectricityIndex + 45); // suggestion
-      setWaterCount(r.currentOccupants || 1);
-      setOtherFee(0);
-      setOtherFeeNote('');
-    }
   };
 
   // Real-time calculations
@@ -76,12 +89,14 @@ export const ElectricityManager: React.FC = () => {
   const waterCost = waterCount * waterRate;
   const wifiFee = selectedRoom?.wifiFee || 0;
   const garbageFee = selectedRoom?.garbageFee || 0;
-  const estimatedTotal = roomPrice + electricityCost + waterCost + wifiFee + garbageFee + (Number(otherFee) || 0);
+  const isOpeningPeriod = targetMonth === 1;
+  const estimatedTotal = roomPrice + (isOpeningPeriod ? 0 : electricityCost) + waterCost + wifiFee + garbageFee + (Number(otherFee) || 0);
 
   const isIndexInvalid = newIndex < oldIndex;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isPeriodClosed) return;
     setFeedback(null);
 
     if (isIndexInvalid) {
@@ -130,7 +145,7 @@ export const ElectricityManager: React.FC = () => {
                 Ghi Chỉ Số Điện Nước & Lập Hóa Đơn
               </h2>
               <p className="text-xs text-slate-400">
-                Đơn giá cố định <strong className="text-amber-400 font-bold">4.000 đ / 1 số điện (kWh)</strong>. Số điện mới tháng này sẽ tự động lưu làm số cũ cho tháng sau!
+                Đơn giá cố định <strong className="text-amber-400 font-bold">4.000 đ / 1 số điện (kWh)</strong>. Chỉ được chốt đến tháng hiện tại; số mới sẽ lưu làm số cũ cho tháng sau.
               </p>
             </div>
           </div>
@@ -142,7 +157,7 @@ export const ElectricityManager: React.FC = () => {
               onChange={(e) => setTargetMonth(Number(e.target.value))}
               className="text-xs font-bold border border-slate-700 rounded-xl px-3 py-2 bg-slate-900 text-slate-100 focus:outline-hidden focus:border-indigo-500"
             >
-              {[7, 8, 9, 10, 11, 12].map((m) => (
+              {Array.from({ length: currentMonth }, (_, index) => index + 1).map((m) => (
                 <option key={m} value={m}>
                   Tháng {m}/{targetYear}
                 </option>
@@ -274,14 +289,14 @@ export const ElectricityManager: React.FC = () => {
               </div>
 
               {/* Electricity Inputs */}
-              <div className="bg-slate-900/80 p-5 rounded-2xl border border-amber-500/30 space-y-3.5">
+                <div className="bg-slate-900/80 p-5 rounded-2xl border border-amber-500/30 space-y-3.5">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center space-x-2 text-amber-400 font-bold text-xs">
                     <Zap className="w-4 h-4 text-amber-400" />
                     <span className="uppercase tracking-wider">CHỈ SỐ ĐIỆN (4.000 đ / 1 kWh)</span>
                   </div>
                   <span className="text-[11px] text-amber-300 bg-amber-500/20 border border-amber-500/30 px-2.5 py-0.5 rounded-md font-bold">
-                    Giá chuẩn: 4.000 đ/số
+                    {isOpeningPeriod ? 'Tháng đầu: chưa tính điện' : 'Giá chuẩn: 4.000 đ/số'}
                   </span>
                 </div>
 
@@ -294,12 +309,13 @@ export const ElectricityManager: React.FC = () => {
                       type="number"
                       value={oldIndex}
                       onChange={(e) => setOldIndex(Number(e.target.value))}
+                      disabled={isPeriodClosed}
                       className="w-full px-3.5 py-2.5 text-sm font-bold border border-slate-700 rounded-xl bg-slate-950 text-slate-100 focus:outline-hidden focus:border-amber-500"
                       min={0}
                       required
                     />
                     <span className="text-[10px] text-slate-400 mt-1 block">
-                      Tự động lấy từ chỉ số tháng trước ({selectedRoom.lastElectricityIndex} kWh)
+                      Tự động lấy từ chỉ số kỳ trước ({oldIndex} kWh)
                     </span>
                   </div>
 
@@ -311,6 +327,7 @@ export const ElectricityManager: React.FC = () => {
                       type="number"
                       value={newIndex}
                       onChange={(e) => setNewIndex(Number(e.target.value))}
+                      disabled={isPeriodClosed}
                       className={`w-full px-3.5 py-2.5 text-sm font-bold border rounded-xl focus:outline-hidden ${
                         isIndexInvalid
                           ? 'border-rose-500 bg-rose-950/40 text-rose-300'
@@ -356,6 +373,7 @@ export const ElectricityManager: React.FC = () => {
                     type="number"
                     value={waterCount}
                     onChange={(e) => setWaterCount(Number(e.target.value))}
+                    disabled={isPeriodClosed}
                     className="w-full px-3 py-2 text-sm font-bold border border-slate-700 rounded-xl bg-slate-950 text-slate-100 focus:outline-hidden focus:border-cyan-500"
                     min={1}
                     max={5}
@@ -377,6 +395,7 @@ export const ElectricityManager: React.FC = () => {
                       placeholder="Ghi chú khác"
                       value={otherFeeNote}
                       onChange={(e) => setOtherFeeNote(e.target.value)}
+                      disabled={isPeriodClosed}
                       className="w-2/3 px-3 py-1.5 text-xs border border-slate-700 rounded-xl bg-slate-950 text-slate-100"
                     />
                     <input
@@ -384,6 +403,7 @@ export const ElectricityManager: React.FC = () => {
                       placeholder="Số tiền"
                       value={otherFee || ''}
                       onChange={(e) => setOtherFee(Number(e.target.value))}
+                      disabled={isPeriodClosed}
                       className="w-1/3 px-3 py-1.5 text-xs border border-slate-700 rounded-xl bg-slate-950 text-slate-100 text-right font-medium"
                     />
                   </div>
@@ -401,15 +421,15 @@ export const ElectricityManager: React.FC = () => {
 
                 <button
                   type="submit"
-                  disabled={isIndexInvalid}
+                  disabled={isIndexInvalid || isPeriodClosed}
                   className={`px-5 py-2.5 rounded-xl font-bold text-xs flex items-center space-x-2 transition ${
-                    isIndexInvalid
+                    isIndexInvalid || isPeriodClosed
                       ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
                       : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30'
                   }`}
                 >
-                  <Save className="w-4 h-4" />
-                  <span>Chốt & Lưu Hóa Đơn</span>
+                  {isPeriodClosed ? <CheckCircle className="w-4 h-4" /> : <Save className="w-4 h-4" />}
+                  <span>{isPeriodClosed ? 'Đã lưu & chốt kỳ này' : 'Chốt & Lưu Hóa Đơn'}</span>
                 </button>
               </div>
             </form>

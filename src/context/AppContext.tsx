@@ -7,14 +7,11 @@ import {
   UserAccount,
   PaymentMethod,
   Tenant,
+  Contract,
+  RoomWarning,
+  ViolationType,
 } from '../types';
-import {
-  INITIAL_ROOMS,
-  INITIAL_INVOICES,
-  INITIAL_PAYMENTS,
-  INITIAL_NOTIFICATIONS,
-  INITIAL_USERS,
-} from '../data/initialData';
+import { buildDefaultContractTerms, VIOLATION_LABELS } from '../constants';
 
 export interface AssignTenantData {
   name: string;
@@ -25,20 +22,39 @@ export interface AssignTenantData {
   deposit: number;
   occupants?: number;
   startElectricityIndex?: number;
+  createContract?: boolean; // Tự tạo hợp đồng điện tử khi cho thuê
+}
+
+export interface ContractDraft {
+  roomId: string;
+  tenantId?: string;
+  tenantName: string;
+  tenantPhone: string;
+  tenantIdCard: string;
+  startDate: string;
+  endDate: string;
+  monthlyRent: number;
+  deposit: number;
+  terms: string;
+  notes?: string;
 }
 
 interface AppContextType {
+  propertyName: string;
+  ownerName: string;
   currentUser: UserAccount | null;
   users: UserAccount[];
   rooms: Room[];
   invoices: Invoice[];
   payments: PaymentRecord[];
   notifications: AppNotification[];
+  contracts: Contract[];
+  warnings: RoomWarning[];
+  warningLimit: number;
   currentMonth: number;
   currentYear: number;
-  login: (username: string) => boolean;
+  login: (username: string, password: string) => Promise<{ success: boolean; message?: string }>;
   logout: () => void;
-  switchUser: (userId: string) => void;
   recordElectricityAndCreateInvoice: (params: {
     roomId: string;
     oldIndex: number;
@@ -64,149 +80,325 @@ interface AppContextType {
   removeTenantFromRoom: (roomId: string, reason?: string) => boolean;
   updateTenant: (roomId: string, tenantData: Partial<Tenant>, occupants?: number) => void;
   toggleRoomStatus: (roomId: string) => void;
+  setInvoiceBillingMode: (invoiceId: string, mode: 'COMBINED' | 'SPLIT') => void;
+  createTenantAccounts: (roomId: string, occupantCount: number) => { success: boolean; message: string };
+  updateUserAccount: (userId: string, updates: Partial<UserAccount>) => void;
+  deleteUserAccount: (userId: string) => void;
   markNotificationAsRead: (notificationId: string) => void;
   markAllNotificationsAsRead: () => void;
   resetData: () => void;
+  updatePropertySettings: (propertyName: string, ownerName: string) => void;
   unreadNotificationCount: number;
+  // Hợp đồng điện tử
+  createContract: (draft: ContractDraft) => { success: boolean; message: string; contract?: Contract };
+  updateContract: (contractId: string, updates: Partial<Contract>) => void;
+  terminateContract: (contractId: string, reason: string) => void;
+  uploadContractScan: (contractId: string, file: File) => Promise<{ success: boolean; message: string }>;
+  // Cảnh cáo phòng trọ
+  issueWarning: (roomId: string, violationType: ViolationType, description: string) => { success: boolean; message: string };
+  revokeWarning: (warningId: string, reason: string) => void;
+  setWarningLimit: (limit: number) => void;
+  warningCountForRoom: (roomId: string) => number;
 }
+
+const normalizeRoomUsername = (roomNumber: string) =>
+  roomNumber
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/[^a-z0-9]/g, '');
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
-const STORAGE_KEYS = {
-  ROOMS: 'nhatro_rooms_v2',
-  INVOICES: 'nhatro_invoices_v2',
-  PAYMENTS: 'nhatro_payments_v2',
-  NOTIFICATIONS: 'nhatro_notifications_v2',
-  CURRENT_USER: 'nhatro_current_user_v2',
-  USERS: 'nhatro_users_v2',
+// Distribute a payment amount across splits in order and set their status
+const applyAmountToSplits = (
+  splits: Invoice['splits'],
+  amount: number,
+  status: 'PENDING_APPROVAL' | 'PAID'
+): Invoice['splits'] => {
+  if (!splits || splits.length === 0) return splits;
+  let remaining = amount;
+  return splits.map((split) => {
+    if (remaining <= 0 || split.status === 'PAID') return split;
+    const capacity = Math.max(0, split.amount - split.paidAmount);
+    const applied = Math.min(capacity, remaining);
+    if (applied <= 0) return split;
+    remaining -= applied;
+    const paidAmount = split.paidAmount + applied;
+    return {
+      ...split,
+      paidAmount,
+      status: paidAmount >= split.amount ? status : 'PENDING_APPROVAL',
+    };
+  });
 };
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const currentMonth = 9;
-  const currentYear = 2026;
-
-  // Load state from localStorage or fallback to initial data
-  const [users, setUsers] = useState<UserAccount[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.USERS);
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        console.error(e);
-      }
-    }
-    return INITIAL_USERS;
-  });
-
-  const [currentUser, setCurrentUser] = useState<UserAccount | null>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.CURRENT_USER);
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        console.error(e);
-      }
-    }
-    // Default to Admin so landlord immediately sees the dashboard
-    return INITIAL_USERS[0];
-  });
-
-  const [rooms, setRooms] = useState<Room[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.ROOMS);
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        console.error(e);
-      }
-    }
-    return INITIAL_ROOMS;
-  });
-
-  const [invoices, setInvoices] = useState<Invoice[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.INVOICES);
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        console.error(e);
-      }
-    }
-    return INITIAL_INVOICES;
-  });
-
-  const [payments, setPayments] = useState<PaymentRecord[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.PAYMENTS);
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        console.error(e);
-      }
-    }
-    return INITIAL_PAYMENTS;
-  });
-
-  const [notifications, setNotifications] = useState<AppNotification[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS);
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        console.error(e);
-      }
-    }
-    return INITIAL_NOTIFICATIONS;
-  });
-
-  // Sync to localStorage
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
-  }, [users]);
+  const [systemDate, setSystemDate] = useState(() => new Date());
+  const currentMonth = systemDate.getMonth() + 1;
+  const currentYear = systemDate.getFullYear();
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.ROOMS, JSON.stringify(rooms));
-  }, [rooms]);
+    const timer = window.setInterval(() => setSystemDate(new Date()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const [propertyName, setPropertyName] = useState<string>('');
+  const [ownerName, setOwnerName] = useState<string>('');
+  const [isHydrated, setIsHydrated] = useState(false);
+
+  const [users, setUsers] = useState<UserAccount[]>([]);
+  const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
+  const [rooms, setRooms] = useState<Room[]>([]);
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [payments, setPayments] = useState<PaymentRecord[]>([]);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [contracts, setContracts] = useState<Contract[]>([]);
+  const [warnings, setWarnings] = useState<RoomWarning[]>([]);
+  const [warningLimit, setWarningLimitState] = useState<number>(5);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.INVOICES, JSON.stringify(invoices));
-  }, [invoices]);
+    const loadFromServer = async () => {
+      try {
+        const token = localStorage.getItem('hm_token');
+        if (!token) {
+          setIsHydrated(true);
+          return;
+        }
+        try {
+          const me = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } });
+          if (me.ok) {
+            const mePayload = await me.json();
+            if (mePayload?.user) setCurrentUser(mePayload.user);
+          } else {
+            localStorage.removeItem('hm_token');
+            setIsHydrated(true);
+            return;
+          }
+        } catch {
+          // fall through and still try loading state
+        }
+        const response = await fetch('/api/state', { headers: { Authorization: `Bearer ${token}` } });
+        if (!response.ok) {
+          throw new Error(`API request failed: ${response.status}`);
+        }
+        const payload = await response.json();
+        if (payload?.propertyName) setPropertyName(payload.propertyName);
+        if (payload?.ownerName) setOwnerName(payload.ownerName);
+        if (payload?.users?.length) setUsers(payload.users);
+        if (payload?.rooms?.length) setRooms(payload.rooms);
+        if (payload?.invoices) {
+          const roomsById = new Map((payload.rooms || []).map((r: any) => [r.id, r]));
+          setInvoices(payload.invoices.map((inv: any) => {
+            if (inv.splits && inv.splits.length > 0) return inv;
+            if (inv.billingMode === 'COMBINED') return inv;
+            const room = roomsById.get(inv.roomId) as any;
+            if (room && room.currentOccupants > 1) {
+              const n = room.currentOccupants;
+              const base = Math.round(inv.totalAmount / n);
+              return {
+                ...inv,
+                splits: Array.from({ length: n }, (_, i) => ({
+                  id: `SPLIT-${inv.roomId}-${inv.month}-${inv.year}-${i + 1}`,
+                  label: `Người ở ${i + 1}`,
+                  amount: i === 0 ? inv.totalAmount - base * (n - 1) : base,
+                  paidAmount: 0,
+                  status: 'UNPAID' as const,
+                })),
+              };
+            }
+            return inv;
+          }));
+        }
+        if (payload?.payments) setPayments(payload.payments);
+        if (payload?.notifications) setNotifications(payload.notifications);
+        if (payload?.contracts) setContracts(payload.contracts);
+        if (payload?.warnings) setWarnings(payload.warnings);
+        if (payload?.warningLimit) setWarningLimitState(Number(payload.warningLimit));
+      } catch (error) {
+        console.error('Server state unavailable:', error);
+      } finally {
+        setIsHydrated(true);
+      }
+    };
+
+    loadFromServer();
+  }, []);
+
+  // Auto-mark invoices past due date as OVERDUE
+  useEffect(() => {
+    if (!isHydrated) return;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    setInvoices((prev) => {
+      let changed = false;
+      const next = prev.map((inv) => {
+        if ((inv.status === 'UNPAID' || inv.status === 'PENDING_APPROVAL') && new Date(inv.dueDate).getTime() < today.getTime()) {
+          changed = true;
+          apiPut(`/api/invoices/${inv.id}`, { ...inv, status: 'OVERDUE' });
+          return { ...inv, status: 'OVERDUE' as const };
+        }
+        return inv;
+      });
+      return changed ? next : prev;
+    });
+  }, [isHydrated, invoices.length]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.PAYMENTS, JSON.stringify(payments));
-  }, [payments]);
+    // State is persisted through fine-grained CRUD calls in each mutation.
+  }, [isHydrated]);
 
+  // Tự chuyển hợp đồng đã quá hạn sang EXPIRED
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(notifications));
-  }, [notifications]);
+    if (!isHydrated || contracts.length === 0) return;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    setContracts((prev) => {
+      let changed = false;
+      const next = prev.map((c) => {
+        if (c.status === 'ACTIVE' && new Date(c.endDate).getTime() < today.getTime()) {
+          changed = true;
+          const expired: Contract = { ...c, status: 'EXPIRED' };
+          apiPut(`/api/contracts/${c.id}`, expired);
+          return expired;
+        }
+        return c;
+      });
+      return changed ? next : prev;
+    });
+  }, [isHydrated, contracts.length]);
 
+  // Nhắc trước khi hợp đồng hết hạn (≤ 30 ngày) — chỉ tạo thông báo 1 lần cho mỗi hợp đồng
   useEffect(() => {
-    if (currentUser) {
-      localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(currentUser));
-    } else {
-      localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
-    }
-  }, [currentUser]);
+    if (!isHydrated) return;
+    const now = new Date();
+    contracts.forEach((c) => {
+      if (c.status !== 'ACTIVE') return;
+      const days = Math.ceil((new Date(c.endDate).getTime() - now.getTime()) / 86_400_000);
+      if (days < 0 || days > 30) return;
+      const notifId = `NOTIF-CTREXP-${c.id}`;
+      if (notifications.some((n) => n.id === notifId)) return;
+      const notif: AppNotification = {
+        id: notifId,
+        targetRole: 'ADMIN',
+        title: `Hợp đồng sắp hết hạn: ${c.roomNumber}`,
+        message: `Hợp đồng ${c.contractCode} của ${c.tenantName} (${c.roomNumber}) hết hạn ngày ${new Date(
+          c.endDate
+        ).toLocaleDateString('vi-VN')} (còn ${days} ngày). Vui lòng liên hệ gia hạn hoặc chấm dứt hợp đồng.`,
+        type: 'SYSTEM',
+        isRead: false,
+        createdAt: now.toISOString(),
+      };
+      setNotifications((prev) => (prev.some((n) => n.id === notifId) ? prev : [notif, ...prev]));
+      apiPost('/api/notifications', notif);
+    });
+  }, [isHydrated, contracts.length, notifications.length]);
+
+  const authHeaders = () => ({
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${localStorage.getItem('hm_token') || ''}`,
+  });
+  const apiPut = (path: string, body: any) =>
+    fetch(path, { method: 'PUT', headers: authHeaders(), body: JSON.stringify(body) }).catch((e) => console.error(e));
+  const apiPost = (path: string, body: any) =>
+    fetch(path, { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) }).catch((e) => console.error(e));
+  const apiPatch = (path: string, body: any) =>
+    fetch(path, { method: 'PATCH', headers: authHeaders(), body: JSON.stringify(body) }).catch((e) => console.error(e));
+  const apiDelete = (path: string) =>
+    fetch(path, { method: 'DELETE', headers: authHeaders() }).catch((e) => console.error(e));
 
   // Login handler
-  const login = (username: string): boolean => {
-    const user = users.find((u) => u.username.toLowerCase() === username.trim().toLowerCase());
-    if (user) {
-      setCurrentUser(user);
-      return true;
+  const login = async (username: string, password: string): Promise<{ success: boolean; message?: string }> => {
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload?.token) {
+        return { success: false, message: payload?.message || 'Đăng nhập thất bại.' };
+      }
+      localStorage.setItem('hm_token', payload.token);
+      setCurrentUser(payload.user);
+      // Reload server state now that we are authenticated
+      try {
+        const stateRes = await fetch('/api/state', { headers: { Authorization: `Bearer ${payload.token}` } });
+        if (stateRes.ok) {
+          const state = await stateRes.json();
+          if (state?.propertyName) setPropertyName(state.propertyName);
+          if (state?.ownerName) setOwnerName(state.ownerName);
+          if (state?.users?.length) setUsers(state.users);
+          if (state?.rooms?.length) setRooms(state.rooms);
+          if (state?.invoices) {
+            const roomsById = new Map((state.rooms || []).map((r: any) => [r.id, r]));
+            setInvoices(state.invoices.map((inv: any) => {
+              if (inv.splits && inv.splits.length > 0) return inv;
+            if (inv.billingMode === 'COMBINED') return inv;
+              const room = roomsById.get(inv.roomId) as any;
+              if (room && room.currentOccupants > 1) {
+                const n = room.currentOccupants;
+                const base = Math.round(inv.totalAmount / n);
+                return {
+                  ...inv,
+                  splits: Array.from({ length: n }, (_, i) => ({
+                    id: `SPLIT-${inv.roomId}-${inv.month}-${inv.year}-${i + 1}`,
+                    label: `Người ở ${i + 1}`,
+                    amount: i === 0 ? inv.totalAmount - base * (n - 1) : base,
+                    paidAmount: 0,
+                    status: 'UNPAID' as const,
+                  })),
+                };
+              }
+              return inv;
+            }));
+          }
+          if (state?.payments) setPayments(state.payments);
+          if (state?.notifications) setNotifications(state.notifications);
+          if (state?.contracts) setContracts(state.contracts);
+          if (state?.warnings) setWarnings(state.warnings);
+          if (state?.warningLimit) setWarningLimitState(Number(state.warningLimit));
+        }
+      } catch {
+        // ignore state load errors; user is still logged in
+      }
+      return { success: true };
+    } catch {
+      return { success: false, message: 'Không kết nối được máy chủ.' };
     }
-    return false;
   };
 
   const logout = () => {
+    localStorage.removeItem('hm_token');
     setCurrentUser(null);
+    setRooms([]);
+    setInvoices([]);
+    setPayments([]);
+    setNotifications([]);
+    setContracts([]);
+    setWarnings([]);
+    setUsers([]);
+    setPropertyName('');
+    setOwnerName('');
   };
 
-  const switchUser = (userId: string) => {
-    const user = users.find((u) => u.id === userId);
-    if (user) {
-      setCurrentUser(user);
-    }
+  const updatePropertySettings = (nextPropertyName: string, nextOwnerName: string) => {
+    const trimmedPropertyName = nextPropertyName.trim();
+    const trimmedOwnerName = nextOwnerName.trim();
+    if (!trimmedPropertyName || !trimmedOwnerName) return;
+
+    setPropertyName(trimmedPropertyName);
+    setOwnerName(trimmedOwnerName);
+    setUsers((prevUsers) =>
+      prevUsers.map((user) =>
+        user.role === 'ADMIN' ? { ...user, fullName: trimmedOwnerName } : user
+      )
+    );
+    setCurrentUser((prevUser) =>
+      prevUser?.role === 'ADMIN' ? { ...prevUser, fullName: trimmedOwnerName } : prevUser
+    );
+    apiPut('/api/settings', { propertyName: trimmedPropertyName, ownerName: trimmedOwnerName });
   };
 
   // 1. Record Electricity & Auto-Calculate Bill
@@ -229,6 +421,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     otherFee?: number;
     otherFeeNote?: string;
   }) => {
+    const requestedPeriod = year * 12 + month;
+    const currentPeriod = currentYear * 12 + currentMonth;
+    if (requestedPeriod > currentPeriod) {
+      return {
+        success: false,
+        message: `Chưa thể chốt kỳ ${month}/${year} vì thời gian thực mới đến ${currentMonth}/${currentYear}!`,
+      };
+    }
+
     const room = rooms.find((r) => r.id === roomId);
     if (!room) {
       return { success: false, message: 'Không tìm thấy phòng!' };
@@ -241,21 +442,73 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    const electricityUsage = newIndex - oldIndex;
+    // January is the opening reading: save the meter for February, but do not charge electricity yet.
+    const isOpeningPeriod = month === 1;
+    const electricityUsage = isOpeningPeriod ? 0 : newIndex - oldIndex;
     const electricityRate = 4000; // 4.000 VNĐ / số điện theo đúng yêu cầu
-    const electricityAmount = electricityUsage * electricityRate;
+    const electricityAmount = isOpeningPeriod ? 0 : electricityUsage * electricityRate;
 
-    // Room pricing
-    const roomPrice = room.basePrice; // 2.000.000 cho VIP, 1.000.000 cho Thường
+    const roomPriceFull = room.basePrice; // 2.000.000 cho VIP, 1.000.000 cho Thường
 
-    // Water pricing: Water per person
+    // Water & electricity split rules: chia đều khi 2 người ở từ đầu tháng,
+    // tính theo ngày thực tế khi người 2 đến giữa tháng.
+    const daysInMonth = new Date(year, month, 0).getDate();
+    const monthStart = new Date(year, month - 1, 1);
+    const monthEnd = new Date(year, month, 0);
+    let secondPersonDays = 0;
+    if (room.currentOccupants >= 2 && room.sharedStartDate) {
+      const start = new Date(room.sharedStartDate);
+      if (start <= monthStart) secondPersonDays = daysInMonth;
+      else if (start <= monthEnd) secondPersonDays = Math.max(0, daysInMonth - start.getDate() + 1);
+    } else if (room.currentOccupants >= 2) {
+      secondPersonDays = daysInMonth;
+    }
+    let mainPersonDays = daysInMonth;
+    if (room.tenant?.startDate) {
+      const mainStart = new Date(room.tenant.startDate);
+      if (mainStart > monthStart && mainStart <= monthEnd) {
+        mainPersonDays = Math.max(0, daysInMonth - mainStart.getDate() + 1);
+      } else if (mainStart > monthEnd) {
+        mainPersonDays = 0;
+      }
+    }
+    const personDays1 = mainPersonDays;
+    const personDays2 = secondPersonDays;
+
+    // Tiền phòng tính theo số ngày ở thực tế của khách chính trong kỳ
+    const roomPrice = Math.round(roomPriceFull * (personDays1 / daysInMonth));
     const occupants = waterCount !== undefined ? waterCount : room.currentOccupants || 1;
-    const waterAmount = occupants * room.waterRate;
+    const waterUsagePersons =
+      occupants >= 2 && (waterCount === undefined || waterCount === room.currentOccupants)
+        ? Math.round(((personDays1 + personDays2) / daysInMonth) * 10) / 10
+        : occupants;
+    const waterAmount =
+      occupants >= 2 && (waterCount === undefined || waterCount === room.currentOccupants)
+        ? Math.round(room.waterRate * ((personDays1 + personDays2) / daysInMonth))
+        : occupants * room.waterRate;
 
     const wifiFee = room.wifiFee;
     const garbageFee = room.garbageFee;
 
     const totalAmount = roomPrice + electricityAmount + waterAmount + wifiFee + garbageFee + otherFee;
+
+    // Split the bill across occupants: equal when both lived the whole month,
+    // proportional to actual days lived together otherwise.
+    const occupantsForSplit = room.currentOccupants || 1;
+    const splits =
+      occupantsForSplit > 1
+        ? (() => {
+            const useProrate = personDays2 > 0 && personDays2 < daysInMonth;
+            const totalPersonDays = personDays1 + personDays2 || 1;
+            const ratio1 = useProrate ? personDays1 / totalPersonDays : 1 / occupantsForSplit;
+            const ratio2 = useProrate ? personDays2 / totalPersonDays : 1 / occupantsForSplit;
+            const amt1 = Math.round(totalAmount * ratio1);
+            return [
+              { id: `SPLIT-${room.id}-${month}-${year}-1`, label: 'Người ở 1', amount: amt1, paidAmount: 0, status: 'UNPAID' as const },
+              { id: `SPLIT-${room.id}-${month}-${year}-2`, label: 'Người ở 2', amount: totalAmount - amt1, paidAmount: 0, status: 'UNPAID' as const },
+            ];
+          })()
+        : undefined;
 
     const invoiceCode = `HD-${year}${String(month).padStart(2, '0')}-${room.id.replace('-', '')}`;
 
@@ -275,7 +528,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         electricityUsage,
         electricityRate,
         electricityAmount,
-        waterUsage: occupants,
+        waterUsage: waterUsagePersons,
         waterAmount,
         wifiFee,
         garbageFee,
@@ -283,6 +536,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         otherFeeNote,
         totalAmount,
         paidAmount: prev.status === 'PAID' ? totalAmount : prev.paidAmount,
+        splits: splits ?? prev.splits,
       };
 
       const updatedList = [...invoices];
@@ -307,7 +561,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         electricityRate,
         electricityAmount,
         waterBillingType: room.waterBillingType,
-        waterUsage: occupants,
+        waterUsage: waterUsagePersons,
         waterRate: room.waterRate,
         waterAmount,
         wifiFee,
@@ -317,6 +571,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         totalAmount,
         paidAmount: 0,
         status: 'UNPAID',
+        splits,
         createdAt: new Date().toISOString(),
         remindedCount: 0,
       };
@@ -324,17 +579,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setInvoices((prev) => [updatedInvoice, ...prev]);
     }
 
-    // UPDATE ROOM's lastElectricityIndex to the newIndex so next month automatically uses it!
-    setRooms((prevRooms) =>
-      prevRooms.map((r) =>
-        r.id === roomId
-          ? {
-              ...r,
-              lastElectricityIndex: newIndex,
-            }
-          : r
-      )
-    );
+    // Keep the room shortcut aligned with the latest recorded billing period.
+    const isLaterPeriod = (leftMonth: number, leftYear: number, rightMonth: number, rightYear: number) =>
+      leftYear > rightYear || (leftYear === rightYear && leftMonth >= rightMonth);
+    const latestRecordedInvoice = invoices
+      .filter((inv) => inv.roomId === roomId && (inv.month !== month || inv.year !== year))
+      .sort((a, b) => b.year - a.year || b.month - a.month)[0];
+
+    if (
+      !latestRecordedInvoice ||
+      isLaterPeriod(month, year, latestRecordedInvoice.month, latestRecordedInvoice.year)
+    ) {
+      setRooms((prevRooms) =>
+        prevRooms.map((r) =>
+          r.id === roomId
+            ? {
+                ...r,
+                lastElectricityIndex: newIndex,
+              }
+            : r
+        )
+      );
+      apiPut(`/api/rooms/${roomId}`, { ...room, lastElectricityIndex: newIndex });
+    }
+
+    apiPut(`/api/invoices/${updatedInvoice.id}`, updatedInvoice);
 
     // Create a notification for the tenant that a bill has been prepared
     const notif: AppNotification = {
@@ -349,6 +618,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       relatedInvoiceId: updatedInvoice.id,
     };
     setNotifications((prev) => [notif, ...prev]);
+    apiPost('/api/notifications', notif);
 
     return {
       success: true,
@@ -397,6 +667,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (newNotifs.length > 0) {
       setNotifications((prev) => [...newNotifs, ...prev]);
     }
+    updatedInvoices
+      .filter((inv) => targetInvoices.some((t) => t.id === inv.id))
+      .forEach((inv) => apiPut(`/api/invoices/${inv.id}`, inv));
+    newNotifs.forEach((n) => apiPost('/api/notifications', n));
 
     return targetInvoices.length;
   };
@@ -441,20 +715,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setPayments((prev) => [newPayment, ...prev]);
+    apiPost('/api/payments', newPayment);
 
-    // Update invoice status to PENDING_APPROVAL
-    setInvoices((prev) =>
-      prev.map((inv) =>
-        inv.id === invoiceId
-          ? {
-              ...inv,
-              paidAmount: amount,
-              status: 'PENDING_APPROVAL',
-              paidAt: nowStr,
-            }
-          : inv
-      )
-    );
+    // Update invoice splits/status for this payment
+    setInvoices((prev) => {
+      const next = prev.map((inv) => {
+        if (inv.id !== invoiceId) return inv;
+        const splits = applyAmountToSplits(inv.splits, amount, 'PENDING_APPROVAL');
+        const newPaidAmount = (inv.paidAmount || 0) + amount;
+        let status: typeof inv.status = inv.status;
+        if (newPaidAmount >= inv.totalAmount) status = 'PENDING_APPROVAL';
+        else if (newPaidAmount > 0) status = 'PARTIAL';
+        return { ...inv, paidAmount: newPaidAmount, status, paidAt: nowStr, splits };
+      });
+      const updated = next.find((inv) => inv.id === invoiceId);
+      if (updated) apiPut(`/api/invoices/${updated.id}`, updated);
+      return next;
+    });
 
     // Send instant notification to landlord account!
     const landlordNotif: AppNotification = {
@@ -472,6 +749,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setNotifications((prev) => [landlordNotif, ...prev]);
+    apiPost('/api/notifications', landlordNotif);
+
+    // Thông báo lại cho người thuê biết đã gửi yêu cầu thanh toán
+    const tenantConfirmNotif: AppNotification = {
+      id: `NOTIF-TENANT-PAY-${Date.now()}`,
+      targetRole: 'TENANT',
+      targetRoomId: invoice.roomId,
+      title: 'Đã gửi báo cáo thanh toán',
+      message: `Bạn đã gửi xác nhận thanh toán ${amount.toLocaleString('vi-VN')} đ cho hóa đơn ${invoice.invoiceCode}. Vui lòng chờ chủ trọ kiểm tra tài khoản và xác nhận.`,
+      type: 'SYSTEM',
+      isRead: false,
+      createdAt: nowStr,
+      relatedInvoiceId: invoice.id,
+      relatedPaymentId: paymentId,
+    };
+    setNotifications((prev) => [tenantConfirmNotif, ...prev]);
+    apiPost('/api/notifications', tenantConfirmNotif);
 
     return true;
   };
@@ -491,15 +785,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           : p
       )
     );
+    apiPatch(`/api/payments/${paymentId}`, { approvedByAdmin: true, approvedAt: nowStr });
 
-    // Update invoice status to PAID
-    setInvoices((prev) =>
-      prev.map((inv) =>
-        inv.id === payment.invoiceId
-          ? { ...inv, status: 'PAID', paidAmount: payment.amount, paidAt: payment.paidAt }
-          : inv
-      )
-    );
+    setInvoices((prev) => {
+      const next = prev.map((inv) => {
+        if (inv.id !== payment.invoiceId) return inv;
+        const splits = (inv.splits || []).map((s) =>
+          s.status === 'PENDING_APPROVAL' ? { ...s, status: 'PAID' as const, paidAmount: s.amount } : s
+        );
+        const allPaid = splits.length > 0 ? splits.every((s) => s.status === 'PAID') : true;
+        return {
+          ...inv,
+          status: allPaid ? ('PAID' as const) : inv.status,
+          paidAmount: payment.amount,
+          paidAt: payment.paidAt,
+          splits,
+        };
+      });
+      const updated = next.find((inv) => inv.id === payment.invoiceId);
+      if (updated) apiPut(`/api/invoices/${updated.id}`, updated);
+      return next;
+    });
 
     // Send confirmation back to tenant
     const tenantNotif: AppNotification = {
@@ -515,6 +821,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setNotifications((prev) => [tenantNotif, ...prev]);
+    apiPost('/api/notifications', tenantNotif);
   };
 
   // Approve payment directly by invoice ID (convenience helper)
@@ -551,14 +858,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
 
       setPayments((prev) => [newPayment, ...prev]);
+      apiPost('/api/payments', newPayment);
 
-      setInvoices((prev) =>
-        prev.map((inv) =>
+      setInvoices((prev) => {
+        const next = prev.map((inv) =>
           inv.id === invoiceId
-            ? { ...inv, status: 'PAID', paidAmount: invoice.totalAmount, paidAt: nowStr }
+            ? {
+                ...inv,
+                status: 'PAID' as const,
+                paidAmount: invoice.totalAmount,
+                paidAt: nowStr,
+                splits: (inv.splits || []).map((s) => ({ ...s, status: 'PAID' as const, paidAmount: s.amount })),
+              }
             : inv
-        )
-      );
+        );
+        const updated = next.find((inv) => inv.id === invoiceId);
+        if (updated) apiPut(`/api/invoices/${updated.id}`, updated);
+        return next;
+      });
 
       const tenantNotif: AppNotification = {
         id: `NOTIF-APP-${Date.now()}`,
@@ -573,14 +890,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
 
       setNotifications((prev) => [tenantNotif, ...prev]);
+      apiPost('/api/notifications', tenantNotif);
     }
   };
 
   // 5. Room & Tenant Management
   const updateRoom = (roomId: string, updates: Partial<Room>) => {
-    setRooms((prev) =>
-      prev.map((r) => (r.id === roomId ? { ...r, ...updates } : r))
-    );
+    setRooms((prev) => {
+      const next = prev.map((r) => {
+        if (r.id !== roomId) return r;
+        const merged = { ...r, ...updates };
+        if (merged.currentOccupants >= 2 && merged.isOccupied && !merged.sharedStartDate) {
+          merged.sharedStartDate = new Date().toISOString().split('T')[0];
+        }
+        return merged;
+      });
+      const updated = next.find((r) => r.id === roomId);
+      if (updated) apiPut(`/api/rooms/${roomId}`, updated);
+      return next;
+    });
   };
 
   // Assign tenant to vacant room (Cho thuê phòng trống)
@@ -601,60 +929,73 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const occupants = data.occupants || 1;
     const lastElec = data.startElectricityIndex !== undefined ? data.startElectricityIndex : room.lastElectricityIndex;
+    const sharedStartDate = occupants > 1 ? (data.startDate || new Date().toISOString().split('T')[0]) : undefined;
 
-    // Update room
-    setRooms((prev) =>
-      prev.map((r) =>
-        r.id === roomId
-          ? {
-              ...r,
-              isOccupied: true,
-              currentOccupants: occupants,
-              tenant: newTenant,
-              lastElectricityIndex: lastElec,
-            }
-          : r
-      )
-    );
+    const updatedRoom = {
+      ...room,
+      isOccupied: true,
+      currentOccupants: occupants,
+      tenant: newTenant,
+      lastElectricityIndex: lastElec,
+      sharedStartDate,
+    };
+    setRooms((prev) => prev.map((r) => (r.id === roomId ? updatedRoom : r)));
+    apiPut(`/api/rooms/${roomId}`, updatedRoom);
 
-    // Create or update user account for this room so tenant can log in
-    const roomClean = room.roomNumber.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const username = roomClean.replace('phong', 'p'); // e.g. "pa1" or "p1"
-    const userId = `user-${room.id.toLowerCase()}`;
+    // Phòng sạch cảnh cáo cho người thuê mới (lưu trữ bản ghi cũ thay vì xóa)
+    archiveRoomWarnings(roomId);
+
+    // Create or update user account(s) for this room so tenant can log in
+    // e.g. "phonga1" or "phong1" — đồng nhất với tên phòng
+    const username = normalizeRoomUsername(room.roomNumber);
 
     setUsers((prev) => {
-      const existing = prev.findIndex((u) => u.roomId === roomId);
-      const newAcc: UserAccount = {
-        id: userId,
-        username: username,
+      let next = [...prev];
+      const existingIndex = next.findIndex((u) => u.roomId === roomId && u.username === username);
+      const firstAcc: UserAccount = {
+        id: `user-${room.id.toLowerCase()}`,
+        username,
         role: 'TENANT',
         fullName: newTenant.name,
         phone: newTenant.phone,
         roomId: room.id,
       };
+      if (existingIndex >= 0) next[existingIndex] = firstAcc;
+      else next.push(firstAcc);
+      apiPut(`/api/users/${firstAcc.id}`, firstAcc);
 
-      if (existing >= 0) {
-        const next = [...prev];
-        next[existing] = newAcc;
-        return next;
+      // For rooms with multiple occupants, create one account per person (share bill)
+      for (let i = 2; i <= occupants; i++) {
+        const subUsername = `${username}-${i}`;
+        const subAcc: UserAccount = {
+          id: `user-${room.id.toLowerCase()}-${i}`,
+          username: subUsername,
+          role: 'TENANT',
+          fullName: `${newTenant.name} (người ${i})`,
+          phone: newTenant.phone,
+          roomId: room.id,
+        };
+        const subExisting = next.findIndex((u) => u.roomId === roomId && u.username === subUsername);
+        if (subExisting >= 0) next[subExisting] = subAcc;
+        else next.push(subAcc);
+        apiPut(`/api/users/${subAcc.id}`, subAcc);
       }
-      return [...prev, newAcc];
+      return next;
     });
 
     // Send admin notification
     const nowStr = new Date().toISOString();
-    setNotifications((prev) => [
-      {
-        id: `NOTIF-ASSIGN-${Date.now()}`,
-        targetRole: 'ADMIN',
-        title: `Đã cho thuê: ${room.roomNumber}`,
-        message: `${room.roomNumber} (${room.type === 'VIP' ? 'VIP' : 'Thường'}) đã được bàn giao cho khách ${newTenant.name} (${newTenant.phone}). Tiền cọc: ${data.deposit.toLocaleString('vi-VN')} đ.`,
-        type: 'SYSTEM',
-        isRead: false,
-        createdAt: nowStr,
-      },
-      ...prev,
-    ]);
+    const assignNotif: AppNotification = {
+      id: `NOTIF-ASSIGN-${Date.now()}`,
+      targetRole: 'ADMIN',
+      title: `Đã cho thuê: ${room.roomNumber}`,
+      message: `${room.roomNumber} (${room.type === 'VIP' ? 'VIP' : 'Thường'}) đã được bàn giao cho khách ${newTenant.name} (${newTenant.phone}). Tiền cọc: ${data.deposit.toLocaleString('vi-VN')} đ.`,
+      type: 'SYSTEM',
+      isRead: false,
+      createdAt: nowStr,
+    };
+    setNotifications((prev) => [assignNotif, ...prev]);
+    apiPost('/api/notifications', assignNotif);
 
     return true;
   };
@@ -667,38 +1008,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const formerTenantName = room.tenant?.name || 'Khách thuê';
     const formerTenantPhone = room.tenant?.phone || '';
 
-    setRooms((prev) =>
-      prev.map((r) =>
-        r.id === roomId
-          ? {
-              ...r,
-              isOccupied: false,
-              currentOccupants: 0,
-              tenant: undefined,
-            }
-          : r
-      )
-    );
+    const clearedRoom = {
+      ...room,
+      isOccupied: false,
+      currentOccupants: 0,
+      tenant: undefined,
+    };
+    setRooms((prev) => prev.map((r) => (r.id === roomId ? clearedRoom : r)));
+    apiPut(`/api/rooms/${roomId}`, clearedRoom);
+
+    // Cảnh cáo của người cũ được lưu trữ lại — người mới vào sẽ bắt đầu từ 0
+    archiveRoomWarnings(roomId);
 
     // Remove or reset tenant user account
+    const removedUser = users.find((u) => u.roomId === roomId);
     setUsers((prev) => prev.filter((u) => u.roomId !== roomId));
+    if (removedUser) apiDelete(`/api/users/${removedUser.id}`);
 
     // Send notification
     const nowStr = new Date().toISOString();
-    setNotifications((prev) => [
-      {
-        id: `NOTIF-LEAVE-${Date.now()}`,
-        targetRole: 'ADMIN',
-        title: `Trả phòng: ${room.roomNumber}`,
-        message: `${room.roomNumber} đã hoàn tất thủ tục trả phòng cho khách ${formerTenantName} (${formerTenantPhone}). Trạng thái phòng chuyển sang Còn trống.${
-          reason ? ` Lý do: ${reason}` : ''
-        }`,
-        type: 'SYSTEM',
-        isRead: false,
-        createdAt: nowStr,
-      },
-      ...prev,
-    ]);
+    const leaveNotif: AppNotification = {
+      id: `NOTIF-LEAVE-${Date.now()}`,
+      targetRole: 'ADMIN',
+      title: `Trả phòng: ${room.roomNumber}`,
+      message: `${room.roomNumber} đã hoàn tất thủ tục trả phòng cho khách ${formerTenantName} (${formerTenantPhone}). Trạng thái phòng chuyển sang Còn trống.${
+        reason ? ` Lý do: ${reason}` : ''
+      }`,
+      type: 'SYSTEM',
+      isRead: false,
+      createdAt: nowStr,
+    };
+    setNotifications((prev) => [leaveNotif, ...prev]);
+    apiPost('/api/notifications', leaveNotif);
 
     return true;
   };
@@ -712,11 +1053,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ...r.tenant,
             ...tenantData,
           };
-          return {
+          const updatedRoom = {
             ...r,
             tenant: updatedTenant,
             currentOccupants: occupants !== undefined ? occupants : r.currentOccupants,
+            sharedStartDate:
+              occupants !== undefined && occupants >= 2 && !r.sharedStartDate
+                ? new Date().toISOString().split('T')[0]
+                : r.sharedStartDate,
           };
+          apiPut(`/api/rooms/${roomId}`, updatedRoom);
+          return updatedRoom;
         }
         return r;
       })
@@ -727,16 +1074,99 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setUsers((prev) =>
         prev.map((u) => {
           if (u.roomId === roomId) {
-            return {
+            const updated = {
               ...u,
               fullName: tenantData.name || u.fullName,
               phone: tenantData.phone || u.phone,
             };
+            apiPut(`/api/users/${updated.id}`, updated);
+            return updated;
           }
           return u;
         })
       );
     }
+  };
+
+  // Create tenant login accounts for a room based on occupant count
+  const setInvoiceBillingMode = (invoiceId: string, mode: 'COMBINED' | 'SPLIT') => {
+    setInvoices((prev) => {
+      const next = prev.map((inv) => {
+        if (inv.id !== invoiceId) return inv;
+        if (mode === 'COMBINED') {
+          return { ...inv, billingMode: mode, splits: [] };
+        }
+        // Giữ nguyên splits hiện có (chia theo tỉ lệ ngày) nếu đã có, chỉ sinh mới khi chưa có
+        if (inv.splits && inv.splits.length > 0) {
+          return { ...inv, billingMode: mode, splits: inv.splits };
+        }
+        const room = rooms.find((r) => r.id === inv.roomId);
+        const n = room?.currentOccupants && room.currentOccupants > 1 ? room.currentOccupants : 2;
+        const base = Math.round(inv.totalAmount / n);
+        const splits = Array.from({ length: n }, (_, i) => ({
+          id: `SPLIT-${inv.roomId}-${inv.month}-${inv.year}-${i + 1}`,
+          label: `Người ở ${i + 1}`,
+          amount: i === 0 ? inv.totalAmount - base * (n - 1) : base,
+          paidAmount: 0,
+          status: 'UNPAID' as const,
+        }));
+        return { ...inv, billingMode: mode, splits };
+      });
+      const updated = next.find((inv) => inv.id === invoiceId);
+      if (updated) apiPut(`/api/invoices/${updated.id}`, updated);
+      return next;
+    });
+  };
+
+  const updateUserAccount = (userId: string, updates: Partial<UserAccount>) => {
+    setUsers((prev) => {
+      const next = prev.map((u) => (u.id === userId ? { ...u, ...updates } : u));
+      const updated = next.find((u) => u.id === userId);
+      if (updated) apiPut(`/api/users/${updated.id}`, updated);
+      return next;
+    });
+  };
+
+  const deleteUserAccount = (userId: string) => {
+    setUsers((prev) => prev.filter((u) => u.id !== userId));
+    apiDelete(`/api/users/${userId}`);
+  };
+
+  const createTenantAccounts = (roomId: string, occupantCount: number): { success: boolean; message: string } => {
+    const room = rooms.find((r) => r.id === roomId);
+    if (!room) return { success: false, message: 'Không tìm thấy phòng!' };
+    if (!room.isOccupied || !room.tenant) return { success: false, message: 'Phòng này chưa có khách thuê.' };
+    if (occupantCount < 1 || occupantCount > 2) return { success: false, message: 'Số người ở tối đa là 2.' };
+
+    const baseUsername = normalizeRoomUsername(room.roomNumber); // đồng nhất với tên phòng, ví dụ "phong1", "phonga1"
+
+    setUsers((prev) => {
+      let next = [...prev];
+      for (let i = 1; i <= occupantCount; i++) {
+        const username = i === 1 ? baseUsername : `${baseUsername}-${i}`;
+        const existing = next.findIndex((u) => u.username === username || (u.roomId === roomId && u.username === username));
+        const acc: UserAccount = {
+          id: i === 1 ? `user-${room.id.toLowerCase()}` : `user-${room.id.toLowerCase()}-${i}`,
+          username,
+          role: 'TENANT',
+          fullName: i === 1 ? room.tenant!.name : `${room.tenant!.name} (người ${i})`,
+          phone: room.tenant!.phone,
+          roomId: room.id,
+        };
+        if (existing >= 0) next[existing] = acc;
+        else next.push(acc);
+        apiPut(`/api/users/${acc.id}`, acc);
+      }
+      // remove extra accounts beyond occupantCount
+      const extraByIndex = next.filter((u) => u.roomId === roomId && u.role === 'TENANT' && /-(\d+)$/.test(u.username) && parseInt(u.username.split('-').pop()!, 10) > occupantCount);
+      if (extraByIndex.length > 0) {
+        extraByIndex.forEach((u) => apiDelete(`/api/users/${u.id}`));
+        next = next.filter((u) => !extraByIndex.includes(u));
+      }
+      return next;
+    });
+
+    return { success: true, message: `Đã tạo ${occupantCount} tài khoản cho ${room.roomNumber} (${baseUsername}${occupantCount === 2 ? ', ' + baseUsername + '-2' : ''}).` };
   };
 
   // Toggle room status between Occupied and Vacant
@@ -746,23 +1176,176 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (room.isOccupied) {
       removeTenantFromRoom(roomId, 'Chủ trọ chuyển trạng thái phòng sang trống');
-    } else {
-      // Default placeholder tenant when toggling to occupied
-      assignTenantToRoom(roomId, {
-        name: 'Khách thuê mới',
-        phone: '0901 000 111',
-        idCard: '079000000000',
-        startDate: new Date().toISOString().split('T')[0],
-        deposit: room.type === 'VIP' ? 2000000 : 1000000,
-        occupants: 1,
-      });
     }
+    // When toggling a vacant room to occupied, use assignTenantToRoom with real tenant info instead.
+  };
+
+  // ---------- Hợp đồng thuê nhà điện tử ----------
+  const createContract = (draft: ContractDraft): { success: boolean; message: string; contract?: Contract } => {
+    const room = rooms.find((r) => r.id === draft.roomId);
+    if (!room) return { success: false, message: 'Không tìm thấy phòng!' };
+    if (!draft.tenantName.trim()) return { success: false, message: 'Thiếu thông tin người thuê.' };
+    if (contracts.some((c) => c.roomId === draft.roomId && c.status === 'ACTIVE')) {
+      return { success: false, message: 'Phòng này đã có hợp đồng còn hiệu lực!' };
+    }
+
+    const contract: Contract = {
+      id: `CTR-${Date.now()}-${room.id}`,
+      contractCode: `HD-${draft.startDate.replace(/-/g, '').slice(0, 6)}-${room.id.replace(/[^a-zA-Z0-9]/g, '')}`,
+      roomId: room.id,
+      roomNumber: room.roomNumber,
+      tenantId: draft.tenantId,
+      tenantName: draft.tenantName.trim(),
+      tenantPhone: draft.tenantPhone.trim(),
+      tenantIdCard: draft.tenantIdCard.trim(),
+      startDate: draft.startDate,
+      endDate: draft.endDate,
+      monthlyRent: draft.monthlyRent,
+      deposit: draft.deposit,
+      terms: draft.terms,
+      notes: draft.notes,
+      status: 'ACTIVE',
+      createdAt: new Date().toISOString(),
+    };
+
+    setContracts((prev) => [contract, ...prev]);
+    apiPost('/api/contracts', contract);
+    return { success: true, message: `Đã tạo hợp đồng ${contract.contractCode} cho ${room.roomNumber}.`, contract };
+  };
+
+  const updateContract = (contractId: string, updates: Partial<Contract>) => {
+    setContracts((prev) => {
+      const next = prev.map((c) => (c.id === contractId ? { ...c, ...updates } : c));
+      const updated = next.find((c) => c.id === contractId);
+      if (updated) apiPut(`/api/contracts/${updated.id}`, updated);
+      return next;
+    });
+  };
+
+  const terminateContract = (contractId: string, reason: string) => {
+    updateContract(contractId, {
+      status: 'TERMINATED',
+      terminatedAt: new Date().toISOString(),
+      terminationReason: reason,
+    });
+  };
+
+  const uploadContractScan = async (contractId: string, file: File): Promise<{ success: boolean; message: string }> => {
+    try {
+      const res = await fetch(`/api/contracts/${contractId}/scan`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'x-file-name': encodeURIComponent(file.name),
+          Authorization: `Bearer ${localStorage.getItem('hm_token') || ''}`,
+        },
+        body: file,
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) return { success: false, message: payload?.message || 'Không tải lên được bản scan.' };
+      setContracts((prev) =>
+        prev.map((c) => (c.id === contractId ? { ...c, scanFilePath: payload.scanFilePath } : c))
+      );
+      return { success: true, message: 'Đã lưu bản scan hợp đồng giấy thành công.' };
+    } catch {
+      return { success: false, message: 'Không kết nối được máy chủ.' };
+    }
+  };
+
+  // ---------- Cảnh cáo phòng trọ ----------
+  const warningCountForRoom = (roomId: string): number =>
+    warnings.filter((w) => w.roomId === roomId && w.status === 'ACTIVE').length;
+
+  const issueWarning = (
+    roomId: string,
+    violationType: ViolationType,
+    description: string
+  ): { success: boolean; message: string } => {
+    const room = rooms.find((r) => r.id === roomId);
+    if (!room) return { success: false, message: 'Không tìm thấy phòng!' };
+    if (!room.isOccupied || !room.tenant) return { success: false, message: 'Phòng này chưa có người thuê.' };
+
+    const nowStr = new Date().toISOString();
+    const newCount = warningCountForRoom(roomId) + 1;
+    const reachedLimit = newCount >= warningLimit;
+
+    const warning: RoomWarning = {
+      id: `WRN-${Date.now()}-${room.id}`,
+      roomId: room.id,
+      roomNumber: room.roomNumber,
+      tenantId: room.tenant.id,
+      tenantName: room.tenant.name,
+      violationType,
+      description: description.trim(),
+      issuedAt: nowStr,
+      issuedBy: ownerName || 'Chủ trọ',
+      status: 'ACTIVE',
+    };
+    setWarnings((prev) => [warning, ...prev]);
+    apiPost('/api/warnings', warning);
+
+    const notif: AppNotification = {
+      id: `NOTIF-WARN-${warning.id}`,
+      targetRole: 'TENANT',
+      targetRoomId: room.id,
+      title: reachedLimit
+        ? `CẢNH BÁO CUỐI ${newCount}/${warningLimit}: ${room.roomNumber}`
+        : `Cảnh cáo nội quy ${newCount}/${warningLimit}: ${room.roomNumber}`,
+      message: `${room.tenant.name} bị cảnh cáo vì hành vi: ${VIOLATION_LABELS[violationType]}.${
+        description.trim() ? ` Ghi chú: ${description.trim()}.` : ''
+      } Tổng cảnh cáo đã nhận: ${newCount}/${warningLimit} lần.${
+        reachedLimit
+          ? ' Bạn đã đạt giới hạn cảnh cáo, vui lòng liên hệ chủ trọ để làm thủ tục rời khỏi nhà trọ trong thời gian thỏa thuận.'
+          : ' Vui lòng chấp hành nội quy nhà trọ để không bị lập biên bản thêm.'
+      }`,
+      type: 'SYSTEM',
+      isRead: false,
+      createdAt: nowStr,
+    };
+    setNotifications((prev) => [notif, ...prev]);
+    apiPost('/api/notifications', notif);
+
+    return {
+      success: true,
+      message: `Đã lập cảnh cáo lần ${newCount}/${warningLimit} cho ${room.roomNumber} (${VIOLATION_LABELS[violationType]})${
+        reachedLimit ? ' — ĐẠT GIỚI HẠN, phòng phải rời đi!' : ''
+      }.`,
+    };
+  };
+
+  const revokeWarning = (warningId: string, reason: string) => {
+    const nowStr = new Date().toISOString();
+    setWarnings((prev) =>
+      prev.map((w) =>
+        w.id === warningId
+          ? { ...w, status: 'REVOKED' as const, revokedAt: nowStr, revokedReason: reason }
+          : w
+      )
+    );
+    apiPatch(`/api/warnings/${warningId}`, { status: 'REVOKED', revokedAt: nowStr, revokedReason: reason });
+  };
+
+  const setWarningLimit = (limit: number) => {
+    const clamped = Math.min(10, Math.max(1, Math.round(Number(limit) || 5)));
+    setWarningLimitState(clamped);
+    apiPut('/api/settings', { propertyName, ownerName, warningLimit: clamped });
+  };
+
+  // Chuyển toàn bộ cảnh cáo còn hiệu lực của phòng sang ARCHIVED (không tính cho người thuê mới)
+  const archiveRoomWarnings = (roomId: string) => {
+    const hasActive = warnings.some((w) => w.roomId === roomId && w.status === 'ACTIVE');
+    if (!hasActive) return;
+    setWarnings((prev) =>
+      prev.map((w) => (w.roomId === roomId && w.status === 'ACTIVE' ? { ...w, status: 'ARCHIVED' as const } : w))
+    );
+    apiPatch(`/api/warnings/room/${roomId}/archive`, {});
   };
 
   const markNotificationAsRead = (id: string) => {
     setNotifications((prev) =>
       prev.map((n) => (n.id === id ? { ...n, isRead: true } : n))
     );
+    apiPatch(`/api/notifications/${id}`, { isRead: true });
   };
 
   const markAllNotificationsAsRead = () => {
@@ -785,21 +1368,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return n;
       })
     );
+    apiPost('/api/notifications/mark-all-read', {});
   };
 
   const resetData = () => {
-    localStorage.removeItem(STORAGE_KEYS.ROOMS);
-    localStorage.removeItem(STORAGE_KEYS.INVOICES);
-    localStorage.removeItem(STORAGE_KEYS.PAYMENTS);
-    localStorage.removeItem(STORAGE_KEYS.NOTIFICATIONS);
-    localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
-    localStorage.removeItem(STORAGE_KEYS.USERS);
-    setRooms(INITIAL_ROOMS);
-    setInvoices(INITIAL_INVOICES);
-    setPayments(INITIAL_PAYMENTS);
-    setNotifications(INITIAL_NOTIFICATIONS);
-    setUsers(INITIAL_USERS);
-    setCurrentUser(INITIAL_USERS[0]);
+    setRooms([]);
+    setInvoices([]);
+    setPayments([]);
+    setNotifications([]);
+    setContracts([]);
+    setWarnings([]);
+    setUsers((previousUsers) => previousUsers.filter((user) => user.role === 'ADMIN'));
+    setCurrentUser((previousUser) => previousUser?.role === 'ADMIN' ? previousUser : null);
+    setRooms((prev) => prev.map((r) => ({ ...r, isOccupied: false, currentOccupants: 0, tenant: undefined })));
+    apiPost('/api/reset', {});
   };
 
   // Unread notifications for current user
@@ -822,6 +1404,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     <AppContext.Provider
       value={{
         currentUser,
+        propertyName,
+        ownerName,
         users,
         rooms,
         invoices,
@@ -831,7 +1415,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         currentYear,
         login,
         logout,
-        switchUser,
         recordElectricityAndCreateInvoice,
         sendPaymentReminder,
         submitPayment,
@@ -842,10 +1425,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         removeTenantFromRoom,
         updateTenant,
         toggleRoomStatus,
+        setInvoiceBillingMode,
+        createTenantAccounts,
+        updateUserAccount,
+        deleteUserAccount,
         markNotificationAsRead,
         markAllNotificationsAsRead,
         resetData,
+        updatePropertySettings,
         unreadNotificationCount,
+        contracts,
+        warnings,
+        warningLimit,
+        createContract,
+        updateContract,
+        terminateContract,
+        uploadContractScan,
+        issueWarning,
+        revokeWarning,
+        setWarningLimit,
+        warningCountForRoom,
       }}
     >
       {children}

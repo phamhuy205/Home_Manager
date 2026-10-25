@@ -8,8 +8,12 @@ import { DashboardOverview } from './components/admin/DashboardOverview';
 import { ElectricityManager } from './components/admin/ElectricityManager';
 import { InvoiceList } from './components/admin/InvoiceList';
 import { RevenueReport } from './components/admin/RevenueReport';
+import { DebtReport } from './components/admin/DebtReport';
 import { PaymentHistoryLog } from './components/admin/PaymentHistoryLog';
 import { RoomManagement } from './components/admin/RoomManagement';
+import { Contracts } from './components/admin/Contracts';
+import { ViolationManager } from './components/admin/ViolationManager';
+import { AccountManager } from './components/admin/AccountManager';
 import { TenantDashboard } from './components/tenant/TenantDashboard';
 import { NotificationModal } from './components/NotificationModal';
 import { LoginModal } from './components/LoginModal';
@@ -23,17 +27,34 @@ import {
   CreditCard,
   Building2,
   BellRing,
+  UserPlus,
+  Wallet,
+  FileSignature,
+  ShieldAlert,
 } from 'lucide-react';
 
-type AdminTab = 'dashboard' | 'electricity' | 'invoices' | 'revenue' | 'payments' | 'rooms';
+type AdminTab =
+  | 'dashboard'
+  | 'electricity'
+  | 'invoices'
+  | 'revenue'
+  | 'debt'
+  | 'payments'
+  | 'rooms'
+  | 'contracts'
+  | 'warnings'
+  | 'accounts';
 
 const MainAppContent: React.FC = () => {
-  const { currentUser, payments } = useApp();
+  const { currentUser, payments, propertyName } = useApp();
   const [adminTab, setAdminTab] = useState<AdminTab>('dashboard');
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [selectedInvoiceForModal, setSelectedInvoiceForModal] = useState<Invoice | null>(null);
   const [filterPaymentIdInLog, setFilterPaymentIdInLog] = useState<string | undefined>(undefined);
+  // Yêu cầu mở sẵn modal trả phòng khi tab Cảnh cáo chuyển sang tab Phòng
+  const [pendingLeaveRequest, setPendingLeaveRequest] = useState<{ roomId: string; reason: string } | null>(null);
+  const [focusWarningRoomId, setFocusWarningRoomId] = useState<string | undefined>(undefined);
 
   const pendingApprovalsCount = payments.filter((p) => !p.approvedByAdmin).length;
 
@@ -113,6 +134,18 @@ const MainAppContent: React.FC = () => {
               </button>
 
               <button
+                onClick={() => setAdminTab('debt')}
+                className={`py-2 px-3.5 sm:px-4 text-xs font-bold rounded-xl transition whitespace-nowrap flex items-center space-x-2 relative ${
+                  adminTab === 'debt'
+                    ? 'bg-cyan-600 text-white shadow-md shadow-cyan-600/30'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/70'
+                }`}
+              >
+                <Wallet className="w-4 h-4" />
+                <span>Công nợ theo kỳ</span>
+              </button>
+
+              <button
                 onClick={() => setAdminTab('payments')}
                 className={`py-2 px-3.5 sm:px-4 text-xs font-bold rounded-xl transition whitespace-nowrap flex items-center space-x-2 relative ${
                   adminTab === 'payments'
@@ -140,6 +173,42 @@ const MainAppContent: React.FC = () => {
                 <Building2 className="w-4 h-4" />
                 <span>16 Phòng trọ</span>
               </button>
+
+              <button
+                onClick={() => setAdminTab('contracts')}
+                className={`py-2 px-3.5 sm:px-4 text-xs font-bold rounded-xl transition whitespace-nowrap flex items-center space-x-2 ${
+                  adminTab === 'contracts'
+                    ? 'bg-violet-600 text-white shadow-md shadow-violet-600/30'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/70'
+                }`}
+              >
+                <FileSignature className="w-4 h-4" />
+                <span>Hợp đồng</span>
+              </button>
+
+              <button
+                onClick={() => setAdminTab('warnings')}
+                className={`py-2 px-3.5 sm:px-4 text-xs font-bold rounded-xl transition whitespace-nowrap flex items-center space-x-2 ${
+                  adminTab === 'warnings'
+                    ? 'bg-rose-600 text-white shadow-md shadow-rose-600/30'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/70'
+                }`}
+              >
+                <ShieldAlert className="w-4 h-4" />
+                <span>Cảnh cáo</span>
+              </button>
+
+              <button
+                onClick={() => setAdminTab('accounts')}
+                className={`py-2 px-3.5 sm:px-4 text-xs font-bold rounded-xl transition whitespace-nowrap flex items-center space-x-2 ${
+                  adminTab === 'accounts'
+                    ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/70'
+                }`}
+              >
+                <UserPlus className="w-4 h-4" />
+                <span>Tài khoản</span>
+              </button>
             </div>
 
             {/* Tab content view */}
@@ -158,13 +227,38 @@ const MainAppContent: React.FC = () => {
 
             {adminTab === 'revenue' && <RevenueReport />}
 
+            {adminTab === 'debt' && <DebtReport />}
+
             {adminTab === 'payments' && (
               <PaymentHistoryLog initialFilterPaymentId={filterPaymentIdInLog} />
             )}
 
             {adminTab === 'rooms' && (
-              <RoomManagement onRecordElectricity={handleSelectRoomForElectricity} />
+              <RoomManagement
+                onRecordElectricity={handleSelectRoomForElectricity}
+                initialLeaveRequest={pendingLeaveRequest}
+                onLeaveRequestConsumed={() => setPendingLeaveRequest(null)}
+                onViewWarnings={(roomId) => {
+                  setFocusWarningRoomId(roomId);
+                  setAdminTab('warnings');
+                }}
+              />
             )}
+
+            {adminTab === 'contracts' && <Contracts />}
+
+            {adminTab === 'warnings' && (
+              <ViolationManager
+                initialRoomId={focusWarningRoomId}
+                onConsumeInitialRoom={() => setFocusWarningRoomId(undefined)}
+                onEvictRoom={(roomId, reason) => {
+                  setPendingLeaveRequest({ roomId, reason });
+                  setAdminTab('rooms');
+                }}
+              />
+            )}
+
+            {adminTab === 'accounts' && <AccountManager />}
           </div>
         ) : (
           /* Not logged in fallback */
@@ -173,7 +267,7 @@ const MainAppContent: React.FC = () => {
               <Building2 className="w-8 h-8" />
             </div>
             <h2 className="text-xl font-bold text-slate-100">
-              Chào mừng bạn đến với Hệ Thống Quản Lý Nhà Trọ An Cư
+              Chào mừng bạn đến với Hệ Thống Quản Lý {propertyName}
             </h2>
             <p className="text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
               Vui lòng đăng nhập với tài khoản Chủ Trọ hoặc chọn phòng thuê để xem hóa đơn, tiền điện nước và thanh toán.

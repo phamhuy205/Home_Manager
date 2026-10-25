@@ -20,10 +20,20 @@ import {
   Check,
   Send,
   ArrowRight,
+  FileSignature,
+  ShieldAlert,
+  Download,
+  ExternalLink,
+  Wallet,
+  FileText,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { formatCurrency, formatDate, formatDateTime, getVietQRUrl } from '../../utils/formatters';
+import { VIOLATION_TYPES } from '../../constants';
+import { exportContractPdf } from '../../utils/pdf';
 import { PaymentModal } from './PaymentModal';
+
+type TenantTab = 'current_bill' | 'payment_qr' | 'history' | 'notifications' | 'contract_rules';
 
 export const TenantDashboard: React.FC = () => {
   const {
@@ -35,10 +45,18 @@ export const TenantDashboard: React.FC = () => {
     submitPayment,
     currentMonth,
     currentYear,
+    setInvoiceBillingMode,
+    contracts,
+    warnings,
+    warningLimit,
+    warningCountForRoom,
+    propertyName,
+    ownerName,
   } = useApp();
 
   const [showPaymentModal, setShowPaymentModal] = useState(false);
-  const [activeTab, setActiveTab] = useState<'current_bill' | 'payment_qr' | 'history' | 'notifications'>('current_bill');
+  const [showTerms, setShowTerms] = useState(false);
+  const [activeTab, setActiveTab] = useState<TenantTab>('current_bill');
 
   // Inline payment form states
   const [transactionRef, setTransactionRef] = useState('');
@@ -65,24 +83,63 @@ export const TenantDashboard: React.FC = () => {
       (!n.targetRoomId || n.targetRoomId === tenantRoom?.id)
   );
 
+  // Hợp đồng của phòng này (ưu tiên hợp đồng còn hiệu lực)
+  const myContract = (() => {
+    const list = contracts.filter((c) => c.roomId === tenantRoom?.id);
+    return list.find((c) => c.status === 'ACTIVE') || list[0];
+  })();
+
+  // Cảnh cáo của người thuê hiện tại (bản lưu trữ của người cũ không hiển thị)
+  const myWarnings = warnings.filter(
+    (w) =>
+      w.roomId === tenantRoom?.id &&
+      w.status !== 'ARCHIVED' &&
+      w.tenantName === (tenantRoom?.tenant?.name || currentUser?.fullName || '')
+  );
+  const myWarningCount = tenantRoom ? warningCountForRoom(tenantRoom.id) : 0;
+  const isOverWarningLimit = myWarningCount >= warningLimit;
+
+  // Tổng hợp cho tab Lịch sử đóng tiền
+  const totalPaidAll = roomPayments.reduce((sum, p) => sum + p.amount, 0);
+  const totalConfirmed = roomPayments
+    .filter((p) => p.approvedByAdmin)
+    .reduce((sum, p) => sum + p.amount, 0);
+  const totalPending = totalPaidAll - totalConfirmed;
+  const totalBilled = roomInvoices.reduce((sum, inv) => sum + inv.totalAmount, 0);
+  const totalPaidOfBilled = roomInvoices.reduce((sum, inv) => sum + inv.paidAmount, 0);
+
   const isVIP = tenantRoom?.type === 'VIP';
   const isPaid = currentInvoice?.status === 'PAID';
   const isPending = currentInvoice?.status === 'PENDING_APPROVAL';
   const isUnpaid = currentInvoice?.status === 'UNPAID';
 
-  const bankAccount = '0909999888';
-  const bankName = 'MB Bank (Ngân hàng Quân Đội)';
-  const accountHolder = 'NGUYEN VAN QUAN (CHỦ TRỌ)';
+  const bankAccount = '103874953538';
+  const bankName = 'VietinBank (Ngân hàng TMCP Công Thương)';
+  const accountHolder = 'PHẠM XUÂN HUY';
   const transferMemo = currentInvoice
     ? `${currentInvoice.roomNumber.replace(/\s+/g, '')} T${currentInvoice.month} ${currentInvoice.year}`
     : `PHONG T${currentMonth}`;
 
+  const mySplitIndexEarly = (() => {
+    const username = currentUser?.username || '';
+    const match = username.match(/-(\d+)$/);
+    return match ? parseInt(match[1], 10) - 1 : 0;
+  })();
+  const myRemainingEarly = (() => {
+    if (!currentInvoice) return 0;
+    if (currentInvoice.splits && currentInvoice.splits.length > 0) {
+      const s = currentInvoice.splits[mySplitIndexEarly];
+      if (s) return Math.max(0, s.amount - s.paidAmount);
+    }
+    return currentInvoice.totalAmount;
+  })();
+
   const qrUrl = currentInvoice
     ? getVietQRUrl({
-        bank: 'MB',
+        bank: 'ICB',
         accountNo: bankAccount,
         accountName: accountHolder,
-        amount: currentInvoice.totalAmount,
+        amount: myRemainingEarly,
         description: transferMemo,
       })
     : '';
@@ -98,16 +155,25 @@ export const TenantDashboard: React.FC = () => {
     }
   };
 
+  // Xác định phần share bill của tài khoản đang đăng nhập (username 'p1' -> người ở 1, 'p1-2' -> người ở 2)
+  const mySplitIndex = (() => {
+    const username = currentUser?.username || '';
+    const match = username.match(/-(\d+)$/);
+    return match ? parseInt(match[1], 10) - 1 : 0;
+  })();
+  const mySplit = currentInvoice?.splits && currentInvoice.splits.length > 0 ? currentInvoice.splits[mySplitIndex] || null : null;
+  const myRemaining = mySplit ? Math.max(0, mySplit.amount - mySplit.paidAmount) : (currentInvoice?.totalAmount || 0);
+
   const handleConfirmPaymentInline = (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentInvoice) return;
 
     const ok = submitPayment({
       invoiceId: currentInvoice.id,
-      amount: currentInvoice.totalAmount,
+      amount: myRemaining,
       method: 'BANK_TRANSFER',
       transactionRef: transactionRef.trim() || undefined,
-      note: paymentNote.trim() || `Khách ${currentUser?.fullName} chuyển khoản tiền phòng ${currentInvoice.roomNumber}`,
+      note: paymentNote.trim() || `Khách ${currentUser?.fullName} chuyển khoản phần tiền phòng ${currentInvoice.roomNumber}`,
     });
 
     if (ok) {
@@ -129,6 +195,26 @@ export const TenantDashboard: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {tenantRoom && tenantRoom.currentOccupants > 1 && currentInvoice && (
+        <div className="bg-slate-900/60 border border-slate-700 rounded-2xl p-3 flex items-center justify-between">
+          <span className="text-xs text-slate-300 font-semibold">Chế độ chia tiền phòng:</span>
+          <div className="flex gap-1.5">
+            <button
+              onClick={() => setInvoiceBillingMode(currentInvoice.id, 'COMBINED')}
+              className={`px-3 py-1.5 rounded-xl text-[11px] font-bold transition ${currentInvoice.billingMode !== 'SPLIT' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}
+            >
+              Tính chung (1 người trả hết)
+            </button>
+            <button
+              onClick={() => setInvoiceBillingMode(currentInvoice.id, 'SPLIT')}
+              className={`px-3 py-1.5 rounded-xl text-[11px] font-bold transition ${currentInvoice.billingMode === 'SPLIT' ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-slate-400'}`}
+            >
+              Tính riêng (chia đều 2)
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Automated Reminder Banner if unpaid */}
       {isUnpaid && currentInvoice && (
         <div className="bg-amber-500/10 p-5 sm:p-6 rounded-3xl border border-amber-500/30 shadow-sm animate-in fade-in">
@@ -147,7 +233,7 @@ export const TenantDashboard: React.FC = () => {
               </div>
               <p className="text-xs text-slate-300 mt-1.5 leading-relaxed">
                 Kính gửi quý khách <strong className="text-slate-100">{currentUser?.fullName}</strong> ({tenantRoom.roomNumber}), hóa đơn tiền phòng và điện nước tháng này của bạn là{' '}
-                <strong className="text-amber-400 text-sm font-black">{formatCurrency(currentInvoice.totalAmount)}</strong>. Quý khách vui lòng chuyển khoản theo mã QR và ấn xác nhận đã chuyển để gửi thông báo cho chủ trọ.
+                <strong className="text-amber-400 text-sm font-black">{formatCurrency(myRemainingEarly)}</strong>. Quý khách vui lòng chuyển khoản theo mã QR và ấn xác nhận đã chuyển để gửi thông báo cho chủ trọ.
               </p>
 
               <div className="mt-3.5 flex flex-wrap items-center gap-2.5">
@@ -305,6 +391,27 @@ export const TenantDashboard: React.FC = () => {
         >
           <Bell className="w-4 h-4" />
           <span>Hộp Thư Nhắc Nhở ({tenantNotifications.length})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('contract_rules')}
+          className={`py-2 px-4 rounded-xl text-xs font-bold transition flex items-center space-x-2 ${
+            activeTab === 'contract_rules'
+              ? 'bg-violet-600 text-white shadow-sm'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+          }`}
+        >
+          <FileSignature className="w-4 h-4" />
+          <span>Hợp Đồng & Nội Quy</span>
+          {myWarningCount > 0 && (
+            <span
+              className={`px-1.5 py-0.5 rounded-full text-[9px] font-black ${
+                isOverWarningLimit ? 'bg-rose-500 text-white' : 'bg-amber-500 text-slate-950'
+              }`}
+            >
+              {myWarningCount}/{warningLimit}
+            </span>
+          )}
         </button>
       </div>
 
@@ -592,11 +699,44 @@ export const TenantDashboard: React.FC = () => {
                   {/* Bill Summary */}
                   <div className="p-5 rounded-3xl bg-slate-900/90 border border-slate-700/80 space-y-3">
                     <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-                      <span className="text-xs font-bold text-slate-400">Số tiền cần thanh toán:</span>
+                      <span className="text-xs font-bold text-slate-400">
+                        {currentInvoice.billingMode === 'SPLIT' ? 'Phần của bạn cần thanh toán:' : 'Số tiền cần thanh toán:'}
+                      </span>
                       <span className="text-2xl font-black text-amber-400">
-                        {formatCurrency(currentInvoice.totalAmount)}
+                        {formatCurrency(currentInvoice.billingMode === 'SPLIT' ? myRemainingEarly : currentInvoice.totalAmount)}
                       </span>
                     </div>
+
+                    {currentInvoice.billingMode === 'SPLIT' && currentInvoice.splits && currentInvoice.splits.length > 0 && (
+                      <div className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl text-xs space-y-1.5">
+                        <div className="font-bold text-slate-300 uppercase text-[10px] tracking-wider">
+                          Chia đều cho 2 người trong phòng:
+                        </div>
+                        {currentInvoice.splits.map((s) => (
+                          <div key={s.id} className="flex justify-between items-center text-slate-300">
+                            <span>{s.label}:</span>
+                            <span className="flex items-center space-x-2">
+                              <strong className="text-slate-100">{formatCurrency(s.amount)}</strong>
+                              {s.status === 'PAID' ? (
+                                <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[9px] font-bold">Đã thanh toán</span>
+                              ) : s.status === 'PENDING_APPROVAL' ? (
+                                <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[9px] font-bold">Chờ duyệt</span>
+                              ) : (
+                                <span className="px-1.5 py-0.5 rounded bg-slate-700 text-slate-400 text-[9px] font-bold">Chưa thanh toán</span>
+                              )}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {currentInvoice.billingMode === 'SPLIT' && mySplit && mySplit.status !== 'UNPAID' && (
+                      <div className={`p-3 rounded-xl text-xs font-bold border ${mySplit.status === 'PAID' ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' : 'bg-amber-500/10 border-amber-500/30 text-amber-300'}`}>
+                        {mySplit.status === 'PAID'
+                          ? `Phần của bạn (${mySplit.label}) đã thanh toán. Cảm ơn bạn!`
+                          : `Phần của bạn (${mySplit.label}) đã được gửi, đang chờ chủ trọ xác nhận.`}
+                      </div>
+                    )}
 
                     <div className="space-y-1.5 text-xs text-slate-300">
                       <div className="flex justify-between">
@@ -623,7 +763,29 @@ export const TenantDashboard: React.FC = () => {
                   </div>
 
                   {/* Flow Status & Confirmation Form */}
-                  {isPaid ? (
+                  {currentInvoice.billingMode === 'SPLIT' && mySplit && mySplit.status !== 'UNPAID' ? (
+                    <div className={`p-6 rounded-3xl border text-center space-y-2 ${mySplit.status === 'PAID' ? 'bg-emerald-500/15 border-emerald-500/30' : 'bg-blue-500/15 border-blue-500/30'}`}>
+                      <div className={`w-12 h-12 rounded-2xl border flex items-center justify-center mx-auto ${mySplit.status === 'PAID' ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300' : 'bg-blue-500/20 border-blue-500/40 text-blue-300'}`}>
+                        <CheckCircle2 className="w-6 h-6" />
+                      </div>
+                      <h4 className={`text-base font-black ${mySplit.status === 'PAID' ? 'text-emerald-300' : 'text-blue-300'}`}>
+                        {mySplit.status === 'PAID' ? 'Chủ Trọ Đã Xác Nhận Phần Của Bạn' : 'Đã Gửi Xác Nhận Phần Của Bạn'}
+                      </h4>
+                      <p className="text-xs text-slate-300 max-w-sm mx-auto">
+                        {mySplit.status === 'PAID'
+                          ? `Phần ${mySplit.label} của bạn đã được xác nhận. Không cần thanh toán thêm.`
+                          : `Phần ${mySplit.label} (${formatCurrency(mySplit.amount)}) đã gửi cho chủ trọ. Khi tiền vào tài khoản chủ trọ sẽ xác nhận.`}
+                      </p>
+                      <div className="mt-3 text-left text-[11px] text-slate-300 bg-slate-950/50 border border-slate-800 rounded-xl p-3 space-y-1">
+                        <div className="font-bold text-slate-400 uppercase text-[10px]">Tổng chi phí phòng cả 2 đã dùng:</div>
+                        <div className="flex justify-between"><span>Tiền phòng:</span><span>{formatCurrency(currentInvoice.roomPrice)}</span></div>
+                        <div className="flex justify-between"><span>Tiền điện:</span><span>{formatCurrency(currentInvoice.electricityAmount)}</span></div>
+                        <div className="flex justify-between"><span>Tiền nước:</span><span>{formatCurrency(currentInvoice.waterAmount)}</span></div>
+                        <div className="flex justify-between"><span>Dịch vụ (Wifi+Rác):</span><span>{formatCurrency(currentInvoice.wifiFee + currentInvoice.garbageFee)}</span></div>
+                        <div className="flex justify-between font-bold text-amber-300 border-t border-slate-800 pt-1"><span>Tổng:</span><span>{formatCurrency(currentInvoice.totalAmount)}</span></div>
+                      </div>
+                    </div>
+                  ) : isPaid ? (
                     <div className="p-6 bg-emerald-500/15 rounded-3xl border border-emerald-500/30 text-center space-y-2">
                       <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center justify-center mx-auto">
                         <CheckCircle2 className="w-6 h-6" />
@@ -651,7 +813,7 @@ export const TenantDashboard: React.FC = () => {
                           // Allow re-submitting if needed
                           const ok = submitPayment({
                             invoiceId: currentInvoice.id,
-                            amount: currentInvoice.totalAmount,
+                            amount: currentInvoice.billingMode === 'SPLIT' ? myRemainingEarly : currentInvoice.totalAmount,
                             method: 'BANK_TRANSFER',
                             note: 'Gửi lại nhắc nhở xác nhận',
                           });
@@ -725,7 +887,77 @@ export const TenantDashboard: React.FC = () => {
 
       {/* TAB 3: Payment History */}
       {activeTab === 'history' && (
-        <div className="bg-[#1E293B] rounded-3xl border border-slate-700 overflow-hidden shadow-sm">
+        <div className="space-y-4">
+          {/* Tổng hợp số tiền đã đóng */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-[#1E293B] p-5 rounded-3xl border border-emerald-500/40 shadow-sm sm:col-span-2 lg:col-span-1">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                  Tổng số tiền đã đóng
+                </span>
+                <div className="w-8 h-8 rounded-xl bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 flex items-center justify-center">
+                  <Wallet className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-3 text-2xl font-black text-emerald-400">{formatCurrency(totalPaidAll)}</div>
+              <p className="text-[11px] text-slate-400 mt-1">
+                Từ khi vào ở • {roomPayments.length} lần đóng tiền
+              </p>
+            </div>
+
+            <div className="bg-[#1E293B] p-5 rounded-3xl border border-slate-700 shadow-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                  Chủ trọ đã xác nhận
+                </span>
+                <div className="w-8 h-8 rounded-xl bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 flex items-center justify-center">
+                  <CheckCircle2 className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-3 text-2xl font-black text-emerald-400">{formatCurrency(totalConfirmed)}</div>
+              <p className="text-[11px] text-slate-400 mt-1">
+                {roomPayments.filter((p) => p.approvedByAdmin).length} giao dịch đã duyệt
+              </p>
+            </div>
+
+            <div className="bg-[#1E293B] p-5 rounded-3xl border border-slate-700 shadow-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                  Đang chờ duyệt
+                </span>
+                <div className="w-8 h-8 rounded-xl bg-amber-500/15 text-amber-400 border border-amber-500/30 flex items-center justify-center">
+                  <Clock className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-3 text-2xl font-black text-amber-400">{formatCurrency(totalPending)}</div>
+              <p className="text-[11px] text-slate-400 mt-1">
+                {roomPayments.filter((p) => !p.approvedByAdmin).length} giao dịch chờ chủ trọ xác nhận
+              </p>
+            </div>
+
+            <div className="bg-[#1E293B] p-5 rounded-3xl border border-slate-700 shadow-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                  Đã nộp / Kỳ phát sinh
+                </span>
+                <div className="w-8 h-8 rounded-xl bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 flex items-center justify-center">
+                  <FileText className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-3 text-2xl font-black text-slate-100">
+                {formatCurrency(totalPaidOfBilled)}{' '}
+                <span className="text-sm font-bold text-slate-400">/ {formatCurrency(totalBilled)}</span>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1">
+                Tổng hóa đơn của phòng • còn nợ{' '}
+                <strong className={totalBilled - totalPaidOfBilled > 0 ? 'text-rose-400' : 'text-emerald-400'}>
+                  {formatCurrency(Math.max(0, totalBilled - totalPaidOfBilled))}
+                </strong>
+              </p>
+            </div>
+          </div>
+
+          <div className="bg-[#1E293B] rounded-3xl border border-slate-700 overflow-hidden shadow-sm">
           <div className="p-5 border-b border-slate-700/80 flex items-center justify-between">
             <h3 className="text-sm font-extrabold text-slate-100">
               Lịch Sử Thanh Toán Của {tenantRoom.roomNumber}
@@ -790,7 +1022,24 @@ export const TenantDashboard: React.FC = () => {
                   ))
                 )}
               </tbody>
+              {roomPayments.length > 0 && (
+                <tfoot>
+                  <tr className="bg-slate-900 border-t-2 border-slate-700 text-slate-100 font-black text-xs">
+                    <td className="py-3 px-4" colSpan={2}>
+                      TỔNG CỘNG {roomPayments.length} LẦN ĐÓNG TIỀN
+                    </td>
+                    <td className="py-3 px-4 text-right text-emerald-400 text-sm">
+                      {formatCurrency(totalPaidAll)}
+                    </td>
+                    <td className="py-3 px-4 text-[10px] font-bold text-slate-400" colSpan={3}>
+                      Đã xác nhận: {formatCurrency(totalConfirmed)} • Chờ duyệt:{' '}
+                      {formatCurrency(totalPending)}
+                    </td>
+                  </tr>
+                </tfoot>
+              )}
             </table>
+          </div>
           </div>
         </div>
       )}
@@ -827,6 +1076,246 @@ export const TenantDashboard: React.FC = () => {
                   </p>
                 </div>
               ))
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* TAB 5: Hợp đồng thuê + Nội quy & Cảnh cáo */}
+      {activeTab === 'contract_rules' && (
+        <div className="space-y-6">
+          {/* Banner vượt giới hạn cảnh cáo */}
+          {isOverWarningLimit && (
+            <div className="bg-rose-500/10 p-5 rounded-3xl border-2 border-rose-500/50 shadow-sm animate-in fade-in">
+              <div className="flex items-start space-x-3">
+                <div className="w-11 h-11 rounded-2xl bg-rose-500/20 text-rose-300 border border-rose-500/40 flex items-center justify-center shrink-0">
+                  <ShieldAlert className="w-5 h-5 animate-pulse" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-black text-rose-300">
+                    BẠN ĐÃ ĐẠT GIỚI HẠN {myWarningCount}/{warningLimit} LẦN CẢNH BÁO
+                  </h3>
+                  <p className="text-xs text-slate-300 mt-1 leading-relaxed">
+                    Theo hợp đồng thuê và nội quy nhà trọ, khi đạt {warningLimit} lần cảnh cáo bạn phải làm thủ tục rời
+                    khỏi nhà trọ. Vui lòng liên hệ chủ trọ ({ownerName}) để được hỗ trợ trong thời gian thỏa thuận.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Hợp đồng thuê nhà */}
+          <div className="bg-[#1E293B] rounded-3xl border border-slate-700 shadow-sm overflow-hidden">
+            <div className="p-6 border-b border-slate-700/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/60">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-2xl bg-violet-500/20 text-violet-300 border border-violet-500/40 flex items-center justify-center">
+                  <FileSignature className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-extrabold text-slate-100">Hợp Đồng Thuê Nhà Điện Tử</h3>
+                  <p className="text-xs text-slate-400">
+                    {myContract ? `Mã HĐ: ${myContract.contractCode}` : 'Chưa có hợp đồng điện tử cho phòng này'}
+                  </p>
+                </div>
+              </div>
+              {myContract && (
+                <span
+                  className={`px-3 py-1 rounded-full text-[10px] font-black border self-start ${
+                    myContract.status === 'TERMINATED'
+                      ? 'bg-slate-700 text-slate-300 border-slate-600'
+                      : myContract.status === 'EXPIRED' ||
+                        (myContract.status === 'ACTIVE' &&
+                          new Date(myContract.endDate).getTime() < Date.now())
+                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                      : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                  }`}
+                >
+                  {myContract.status === 'TERMINATED'
+                    ? 'Đã chấm dứt'
+                    : myContract.status === 'EXPIRED' ||
+                      new Date(myContract.endDate).getTime() < Date.now()
+                    ? 'Đã hết hạn'
+                    : 'Còn hiệu lực'}
+                </span>
+              )}
+            </div>
+
+            {myContract ? (
+              <div className="p-6 space-y-5">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                  <div className="p-3 bg-slate-900 rounded-xl border border-slate-700">
+                    <span className="text-slate-400 block text-[10px] uppercase font-bold tracking-wider">
+                      Thời hạn
+                    </span>
+                    <span className="text-slate-100 font-bold">
+                      {formatDate(myContract.startDate)} &rarr; {formatDate(myContract.endDate)}
+                    </span>
+                  </div>
+                  <div className="p-3 bg-slate-900 rounded-xl border border-slate-700">
+                    <span className="text-slate-400 block text-[10px] uppercase font-bold tracking-wider">
+                      Giá thuê
+                    </span>
+                    <span className="text-amber-400 font-black">
+                      {formatCurrency(myContract.monthlyRent)}/tháng
+                    </span>
+                  </div>
+                  <div className="p-3 bg-slate-900 rounded-xl border border-slate-700">
+                    <span className="text-slate-400 block text-[10px] uppercase font-bold tracking-wider">
+                      Tiền đặt cọc
+                    </span>
+                    <span className="text-slate-100 font-bold">{formatCurrency(myContract.deposit)}</span>
+                  </div>
+                  <div className="p-3 bg-slate-900 rounded-xl border border-slate-700">
+                    <span className="text-slate-400 block text-[10px] uppercase font-bold tracking-wider">
+                      Hết hạn sau
+                    </span>
+                    <span className="text-slate-100 font-bold">
+                      {Math.max(
+                        0,
+                        Math.ceil((new Date(myContract.endDate).getTime() - Date.now()) / 86_400_000)
+                      )}{' '}
+                      ngày
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => exportContractPdf(myContract, propertyName, ownerName)}
+                    className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-black transition flex items-center space-x-1.5 shadow-sm"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Tải hợp đồng (PDF)</span>
+                  </button>
+                  {myContract.scanFilePath && (
+                    <a
+                      href={myContract.scanFilePath}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold text-slate-200 transition flex items-center space-x-1.5"
+                    >
+                      <ExternalLink className="w-4 h-4" />
+                      <span>Xem bản scan giấy</span>
+                    </a>
+                  )}
+                  <button
+                    onClick={() => setShowTerms((v) => !v)}
+                    className="px-4 py-2.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-black transition flex items-center space-x-1.5 shadow-sm"
+                  >
+                    <FileSignature className="w-4 h-4" />
+                    <span>{showTerms ? 'Ẩn điều khoản' : 'Xem điều khoản & nội quy'}</span>
+                  </button>
+                </div>
+
+                {showTerms && (
+                  <div className="p-4 bg-slate-950/70 border border-slate-800 rounded-2xl text-xs text-slate-300 leading-relaxed whitespace-pre-wrap max-h-96 overflow-y-auto">
+                    {myContract.terms || 'Chưa có điều khoản.'}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="p-6 text-center text-slate-500 text-xs">
+                Phòng chưa được lập hợp đồng điện tử. Vui lòng liên hệ chủ trọ để ký hợp đồng.
+              </div>
+            )}
+          </div>
+
+          {/* Nội quy nhà trọ */}
+          <div className="bg-[#1E293B] rounded-3xl border border-slate-700 shadow-sm p-6 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-700/80">
+              <div className="flex items-center space-x-2.5">
+                <ShieldCheck className="w-5 h-5 text-indigo-400" />
+                <h3 className="text-sm font-extrabold text-slate-100">
+                  Nội Quy Nhà Trọ — 6 Hành Vi Bị Cấm (mỗi lần bị lập biên bản)
+                </h3>
+              </div>
+              <span
+                className={`px-3 py-1 rounded-full text-[10px] font-black border ${
+                  isOverWarningLimit
+                    ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                    : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                }`}
+              >
+                Bạn: {myWarningCount}/{warningLimit} lần
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              {VIOLATION_TYPES.map((v, idx) => {
+                const count = myWarnings.filter(
+                  (w) => w.violationType === v.type && w.status === 'ACTIVE'
+                ).length;
+                return (
+                  <div
+                    key={v.type}
+                    className={`p-3.5 rounded-2xl border flex items-start justify-between gap-2 ${
+                      count > 0
+                        ? 'bg-rose-500/10 border-rose-500/40'
+                        : 'bg-slate-900/70 border-slate-700'
+                    }`}
+                  >
+                    <div>
+                      <div className={`text-xs font-black ${count > 0 ? 'text-rose-300' : 'text-slate-200'}`}>
+                        {idx + 1}. {v.label}
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5 leading-snug">{v.hint}</div>
+                    </div>
+                    {count > 0 && (
+                      <span className="px-2 py-0.5 rounded-full text-[9px] font-black bg-rose-500/20 text-rose-300 border border-rose-500/40 shrink-0">
+                        {count} lần
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Lịch sử cảnh cáo */}
+          <div className="bg-[#1E293B] rounded-3xl border border-slate-700 shadow-sm p-6 space-y-4">
+            <h3 className="text-sm font-extrabold text-slate-100 pb-3 border-b border-slate-700/80">
+              Lịch Sử Biên Bản Cảnh Cáo ({myWarnings.length})
+            </h3>
+            {myWarnings.length === 0 ? (
+              <div className="py-8 text-center text-slate-400 text-xs">
+                🎉 Bạn chưa từng bị lập biên bản cảnh cáo. Hãy tiếp tục chấp hành nội quy nhà trọ!
+              </div>
+            ) : (
+              <div className="space-y-2.5">
+                {myWarnings.map((w) => (
+                  <div
+                    key={w.id}
+                    className="p-4 rounded-2xl border border-slate-700/80 bg-slate-900/60 flex items-start justify-between gap-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center space-x-2 flex-wrap">
+                        <ShieldAlert
+                          className={`w-4 h-4 ${w.status === 'ACTIVE' ? 'text-rose-400' : 'text-slate-500'}`}
+                        />
+                        <span className="text-xs font-black text-slate-100">
+                          {VIOLATION_TYPES.find((v) => v.type === w.violationType)?.label || w.violationType}
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[9px] font-bold border ${
+                            w.status === 'ACTIVE'
+                              ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                              : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                          }`}
+                        >
+                          {w.status === 'ACTIVE' ? 'Còn hiệu lực' : 'Đã thu hồi'}
+                        </span>
+                      </div>
+                      {w.description && (
+                        <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">{w.description}</p>
+                      )}
+                      <p className="text-[10px] text-slate-500 mt-1">
+                        {formatDateTime(w.issuedAt)} • Người lập: {w.issuedBy || 'Chủ trọ'}
+                        {w.revokedReason ? ` • Lý do thu hồi: ${w.revokedReason}` : ''}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
         </div>
