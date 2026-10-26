@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "server": "tsx server.ts",
+    "start": "tsx server.ts",
     "db:seed:generate": "tsx scripts/generate-seed.ts",
     "dev:full": "concurrently -k \"tsx server.ts\" \"vite --port=3000 --host=0.0.0.0\"",
     "build": "vite build",

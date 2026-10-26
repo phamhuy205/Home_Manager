@@ -21,6 +21,10 @@ if (!databaseUrl || databaseUrl.includes('your_password')) {
 
 const client = new Client({
   connectionString: databaseUrl,
+  // Render PostgreSQL luôn bắt buộc SSL (chứng chỉ self-signed nên bỏ kiểm tra CA).
+  ssl: databaseUrl.includes('render.com') || process.env.PGSSLMODE === 'require'
+    ? { rejectUnauthorized: false }
+    : undefined,
 });
 
 const jwtSecret = process.env.JWT_SECRET || 'dev-only-insecure-secret-change-me';
@@ -53,6 +57,10 @@ app.use(express.json({ limit: '4mb' }));
 // File scan hợp đồng (upload thô qua express.raw, không cần dependency multipart)
 const UPLOADS_DIR = join(process.cwd(), 'uploads', 'contracts');
 app.use('/uploads', express.static(join(process.cwd(), 'uploads')));
+
+// Phục vụ React build (dist/) để một service Render chạy cả API lẫn giao diện.
+const DIST_DIR = join(process.cwd(), 'dist');
+app.use(express.static(DIST_DIR));
 
 // Basic request logging
 app.use((req, res, next) => {
@@ -570,6 +578,14 @@ app.post('/api/reset', requireAuth, requireAdmin, async (_req, res) => {
     console.error(error);
     res.status(500).json({ message: 'Không khôi phục được dữ liệu.' });
   }
+});
+
+// Fallback SPA: mọi GET không phải /api trả về index.html (tránh 404 khi refresh trang).
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) return next();
+  res.sendFile(join(DIST_DIR, 'index.html'), (error) => {
+    if (error) next();
+  });
 });
 
 const bootstrap = async () => {
